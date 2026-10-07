@@ -1532,6 +1532,24 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "TheFoolThatDoesntBelongToThisEra",
+      "name": "⃟",
+      "avatar_url": "https://avatars.githubusercontent.com/u/252236154?v=4",
+      "profile": "https://github.com/TheFoolThatDoesntBelongToThisEra",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "theoilie",
+      "name": "Theo Ilie",
+      "avatar_url": "https://avatars.githubusercontent.com/u/4657956?v=4",
+      "profile": "https://github.com/theoilie",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,
