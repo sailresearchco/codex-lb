@@ -10,7 +10,12 @@ from typing import cast
 
 import aiohttp
 
-from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.clients.proxy import (
+    ProxyResponseError,
+    _retry_after_seconds_from_header,
+    _safe_retry_after_header,
+    filter_inbound_headers,
+)
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
@@ -219,12 +224,15 @@ class HTTPBridgeOwnerClient:
                             # non-200 response, so the origin may safely release.
                             on_response_rejected()
                         payload_text = await response.text()
+                        retry_after_header = _safe_retry_after_header(response.headers)
                         raise ProxyResponseError(
                             response.status,
                             _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
                             failure_phase="owner_forward_status",
                             failure_detail="owner_forward_non_200",
                             upstream_status_code=response.status,
+                            retry_after_header=retry_after_header,
+                            retry_after_seconds=_retry_after_seconds_from_header(retry_after_header),
                             # Rebuilding the error from the owner's body alone
                             # would drop the provenance the owner attached, so
                             # carry it over the hop: a non-200 by itself does

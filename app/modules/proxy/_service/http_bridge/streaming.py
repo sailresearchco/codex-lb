@@ -1812,6 +1812,25 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
+            context_retention_result = (
+                durable_full_resend_has_safe_fresh_context
+                if durable_full_resend_anchor_reason is None
+                else "not_checked"
+            )
+            pending_tool_manifest_count = (
+                len(durable_lookup.latest_pending_tool_calls)
+                if durable_lookup.latest_pending_tool_calls is not None
+                else "unknown"
+            )
+            fresh_reattach_anchor_detail = (
+                f"response_id={durable_lookup.latest_response_id}"
+                f" anchor_rejection={durable_full_resend_anchor_reason or 'none'}"
+                f" full_resend_shaped={payload_looks_like_full_resend}"
+                f" stored_input_items={durable_lookup.latest_input_item_count}"
+                f" context_retained={context_retention_result}"
+                f" pending_tool_manifest_count={pending_tool_manifest_count}"
+                f" proof_present={durable_full_resend_proof is not None}"
+            )
             if (
                 fresh_reattach_can_use_durable_anchor
                 and payload_looks_like_full_resend
@@ -1843,7 +1862,7 @@ class _HTTPBridgeStreamingMixin:
                         bridge_session_key,
                         account_id=None,
                         model=payload.model,
-                        detail=f"response_id={durable_lookup.latest_response_id}",
+                        detail=fresh_reattach_anchor_detail,
                         cache_key_family=bridge_session_key.affinity_kind,
                         model_class=_extract_model_class(payload.model) if payload.model else None,
                     )
@@ -1859,7 +1878,7 @@ class _HTTPBridgeStreamingMixin:
                     bridge_session_key,
                     account_id=None,
                     model=payload.model,
-                    detail=f"response_id={durable_lookup.latest_response_id}",
+                    detail=fresh_reattach_anchor_detail,
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )

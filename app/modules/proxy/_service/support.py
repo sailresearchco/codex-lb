@@ -995,6 +995,16 @@ class _HTTPBridgeRetryCircuitAttemptSelection:
         return len(self.attempts) > 1
 
 
+@dataclass(frozen=True, eq=False, slots=True)
+class _HTTPBridgeHalfOpenProbe:
+    key: _HTTPBridgeSessionKey
+    lease_until: float
+    consecutive_failures: int
+    last_failure_monotonic: float
+    persisted_updated_at_epoch: float
+    persisted_admission_generation: int
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -1153,6 +1163,9 @@ class _WebSocketRequestState:
     # it claimed none); released by the submit finalizer whenever the probe
     # was never dispatched, so no pre-dispatch exit can strand the lease.
     claimed_half_open_until: float = 0.0
+    # Identity and episode captured by admission, so a matched terminal can
+    # return this probe without releasing a sibling or a replacement episode.
+    claimed_half_open_probe: _HTTPBridgeHalfOpenProbe | None = None
     # True while the submit owns an admission-waiter registration taken at
     # submit entry, before the retry-circuit gate, that the dispatch path has
     # not yet taken over. It keeps the turn visible to a concurrent
@@ -1404,6 +1417,10 @@ class _HTTPBridgeSession:
     # through this task so invalidation and shutdown can distinguish a rejected
     # session from one whose socket and leases actually have a close owner.
     resource_close_task: asyncio.Task[None] | None = None
+    # Retirement can remove draining requests before resource closure. Keep
+    # their exact claims until the close owner proves the transport stopped.
+    retired_probe_requests: list[tuple[_WebSocketRequestState, _HTTPBridgeHalfOpenProbe]] = field(default_factory=list)
+    retired_probe_reader: asyncio.Task[None] | None = None
     # ``closed`` rejects new admissions but is written by many unrelated
     # retirement paths; it never proves that a sender owns pending settlement.
     # Only the submitter may claim this, while holding ``lifecycle_lock``, when

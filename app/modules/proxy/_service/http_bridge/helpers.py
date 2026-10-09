@@ -1553,6 +1553,16 @@ async def _settle_failed_http_bridge_creation(
         return superseded
 
 
+def _retain_http_bridge_retired_probes_locked(session: _HTTPBridgeSession) -> None:
+    """Transfer probe ownership before pending settlement; hold pending_lock."""
+    for request in session.pending_requests:
+        probe = request.claimed_half_open_probe
+        if probe is not None and not any(retained is probe for _, retained in session.retired_probe_requests):
+            session.retired_probe_requests.append((request, probe))
+    if session.retired_probe_requests and session.upstream_reader is not None:
+        session.retired_probe_reader = session.upstream_reader
+
+
 async def _close_http_bridge_session_resources(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -1577,6 +1587,8 @@ async def _close_http_bridge_session_resources(
         logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
     finally:
         session.account_lease = None
+    async with session.pending_lock:
+        _retain_http_bridge_retired_probes_locked(session)
     durable_release_succeeded = durable_owner_epoch is None
     if durable_release_allowed:
         try:
@@ -1625,8 +1637,10 @@ async def _close_http_bridge_session_resources(
             )
             if session.upstream_reader is upstream_reader:
                 session.upstream_reader = None
+    upstream_closed = False
     try:
         await session.upstream.close()
+        upstream_closed = True
     except Exception:
         logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
     pending_requests = getattr(session, "pending_requests", None)
@@ -1645,6 +1659,35 @@ async def _close_http_bridge_session_resources(
             api_key=None,
             response_create_gate=response_create_gate,
         )
+    # The bounded wrapper may already have returned, and a retiring reader
+    # cannot finish until its own close call returns. Only actual reader exit
+    # plus successful socket closure proves these probes ended upstream.
+    retired_reader = session.retired_probe_reader
+    if upstream_closed:
+        async with session.pending_lock:
+            retired_probes = tuple(session.retired_probe_requests)
+
+        async def return_retired_probes() -> None:
+            for request, probe in retired_probes:
+                if request.claimed_half_open_probe is probe:
+                    await service._return_http_bridge_ended_probe(session, request)
+                async with session.pending_lock:
+                    session.retired_probe_requests.remove((request, probe))
+            session.retired_probe_reader = None
+
+        if retired_reader is None or retired_reader.done():
+            await return_retired_probes()
+        elif retired_probes:
+
+            def reader_finished(_reader: asyncio.Task[None]) -> None:
+                _schedule_http_bridge_background_cleanup(
+                    service,
+                    return_retired_probes(),
+                    name=f"http-bridge-retired-probe-return-{_hash_identifier(session.key.affinity_key)}",
+                    error_message="Failed to return retired HTTP bridge probes after reader exit",
+                )
+
+            retired_reader.add_done_callback(reader_finished)
     _log_http_bridge_event(
         "close",
         session.key,
@@ -1725,6 +1768,9 @@ async def _close_http_bridge_session_bounded(
     reason: str,
 ) -> None:
     if session.upstream_reader is asyncio.current_task():
+        # Avoid cancelling the caller, without treating its detached reference
+        # as proof that the reader has actually stopped.
+        session.retired_probe_reader = session.upstream_reader
         session.upstream_reader = None
 
     close_task = scheduler_for(service).create_task(

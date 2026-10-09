@@ -2582,6 +2582,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                         continue
                 request_state.terminal_settlement_phase = "abandoned"
                 try:
+                    # A terminal popped before a bookkeeping failure still
+                    # ended its probe; pending retries above retain theirs.
+                    await self._return_http_bridge_ended_probe(session, request_state)
                     self._cancel_request_state_api_key_reservation_heartbeat(request_state)
                     await self._release_websocket_request_state_reservation(request_state)
                     request_state.api_key_reservation = None
@@ -4243,6 +4246,7 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         terminal_strike_failures: int | None = None
         terminal_poison_detail: str | None = None
+        probe_return_cancellation: asyncio.CancelledError | None = None
 
         async def _finalize_terminal_settlement(settled_request_state: _WebSocketRequestState) -> None:
             try:
@@ -4315,6 +4319,19 @@ class _HTTPBridgeUpstreamEventsMixin:
                     terminal_pre_response_frame=True,
                 )
                 terminal_poison_detail = await self._http_bridge_effective_anchor_poison_detail(session, error_code)
+
+            if terminal_request_state is not None and terminal_request_state.claimed_half_open_probe is not None:
+                # Recovery attempts have all declined by this point and the
+                # matched upstream lifecycle is terminal. Non-transport
+                # failures do not settle the circuit, but must return their
+                # own probe before the failure reaches a retrying client.
+                # Defer cancellation while taking the circuit lock: the
+                # popped request has no later terminal to return this claim.
+                probe_return_task = scheduler.create_task(
+                    self._return_http_bridge_ended_probe(session, terminal_request_state),
+                    name=f"http-bridge-terminal-probe-return-{terminal_request_state.request_id}",
+                )
+                _, probe_return_cancellation = await _await_task_deferring_cancellation(probe_return_task)
 
         matched_event_queue = (
             completed_event_queue
@@ -4419,7 +4436,9 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         matched_terminal_enqueued = False
         terminal_publication_cancellation: asyncio.CancelledError | None = None
-        if terminal_poison_detail is not None and terminal_strike_failures is not None:
+        if (
+            terminal_poison_detail is not None and terminal_strike_failures is not None
+        ) or probe_return_cancellation is not None:
             # Publication and settlement share one deferral for a poison
             # terminal: a cancellation landing inside the operation
             # persistence, between the queued frame and its sentinel, or on
@@ -4536,3 +4555,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 raise terminal_settlement_cancellation
         else:
             await _finalize_terminal_settlement(terminal_request_state)
+        if terminal_publication_cancellation is not None:
+            raise terminal_publication_cancellation
+        if probe_return_cancellation is not None:
+            raise probe_return_cancellation
