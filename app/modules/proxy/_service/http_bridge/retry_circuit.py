@@ -22,10 +22,12 @@ from app.modules.proxy._service.http_bridge.quarantine import (
 )
 from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import (
+    _HTTPBridgeHalfOpenProbe,
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _WebSocketRequestState,
 )
 from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
 
@@ -149,6 +151,7 @@ class _HTTPBridgeRetryCircuitState:
     last_failure_monotonic: float = 0.0
     last_durable_load_monotonic: float = 0.0
     half_open_until: float = 0.0
+    half_open_probe: _HTTPBridgeHalfOpenProbe | None = None
     # One poisoned anchor is abandoned once. Capping the poison threshold at
     # the circuit threshold makes every later strike in the same episode meet
     # it too, so without this marker each one re-issues the durable clear. A
@@ -1104,6 +1107,7 @@ class _HTTPBridgeRetryCircuitMixin:
         allow_fresh_hard_account_switch: bool = False,
         allow_proof_gated_continuity_replay: bool = False,
         claimed_lease_out: list[float] | None = None,
+        claimed_probe_out: list[_HTTPBridgeHalfOpenProbe] | None = None,
     ) -> bool:
         """Avoid replaying a repeatedly failing hard-affinity request in a tight loop."""
         if session.key.strength != "hard":
@@ -1127,6 +1131,16 @@ class _HTTPBridgeRetryCircuitMixin:
                 if state is not None and state.cooldown_until > 0:
                     state.cooldown_until = 0.0
                     state.half_open_until = now + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
+                    state.half_open_probe = _HTTPBridgeHalfOpenProbe(
+                        key=session.key,
+                        lease_until=state.half_open_until,
+                        consecutive_failures=state.consecutive_failures,
+                        last_failure_monotonic=state.last_failure_monotonic,
+                        persisted_updated_at_epoch=state.persisted_updated_at_epoch,
+                        persisted_admission_generation=state.persisted_admission_generation,
+                    )
+                    if claimed_probe_out is not None:
+                        claimed_probe_out.append(state.half_open_probe)
                     if claimed_lease_out is not None:
                         # The exact lease this admission claimed, handed out
                         # under the same lock that installed it, so a
@@ -1174,6 +1188,48 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.last_detail,
             )
             return False
+
+    async def _return_http_bridge_ended_probe(
+        self: Any,
+        session: _HTTPBridgeSession,
+        request_state: _WebSocketRequestState,
+    ) -> None:
+        """Return only an ended request's still-owned, unchanged probe.
+
+        A matched terminal or completed transport retirement ends this probe
+        without necessarily proving recovery or another circuit failure.
+        Preserve the episode and its poison evidence, and leave a transition
+        for admission to claim one replacement instead of admitting all waiters.
+        """
+        probe = request_state.claimed_half_open_probe
+        if probe is None or probe.key != session.key:
+            return
+        async with self._http_bridge_retry_circuit_lock:
+            if request_state.claimed_half_open_probe is not probe:
+                return
+            state = self._http_bridge_retry_circuits.get(session.key)
+            request_state.claimed_half_open_probe = None
+            if (
+                state is None
+                or state.half_open_probe is not probe
+                or state.half_open_until != probe.lease_until
+                or state.consecutive_failures != probe.consecutive_failures
+                or state.last_failure_monotonic != probe.last_failure_monotonic
+                or state.persisted_updated_at_epoch != probe.persisted_updated_at_epoch
+                or state.persisted_admission_generation != probe.persisted_admission_generation
+                or state.cooldown_until > clock_for(self).monotonic()
+            ):
+                return
+            state.half_open_until = 0.0
+            state.half_open_probe = None
+            state.cooldown_until = clock_for(self).monotonic() - 1.0
+            request_state.claimed_half_open_until = 0.0
+            logger.info(
+                "http_bridge_retry_circuit event=ended_probe_returned bridge_kind=%s bridge_key=%s failures=%s",
+                session.key.affinity_kind,
+                _hash_identifier(session.key.affinity_key),
+                state.consecutive_failures,
+            )
 
     async def _http_bridge_poison_anchor_clear_owed(
         self: Any,

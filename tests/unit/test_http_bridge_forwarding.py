@@ -1417,11 +1417,24 @@ async def test_owner_forward_non_200_body_read_failure_keeps_rejected(
         ({}, False),
     ],
 )
+@pytest.mark.parametrize(
+    ("retry_after", "expected_header", "expected_seconds"),
+    [
+        ("42", "42", 42),
+        ("2147483648", "2147483648", 2147483647),
+        ("Wed, 21 Oct 2026 07:28:00 GMT", "Wed, 21 Oct 2026 07:28:00 GMT", None),
+        ("42\r\nx-injected: true", None, None),
+        (None, None, None),
+    ],
+)
 @pytest.mark.asyncio
 async def test_owner_forward_non_200_carries_local_refusal_provenance(
     monkeypatch: pytest.MonkeyPatch,
     owner_headers: dict[str, str],
     expected_local_refusal: bool,
+    retry_after: str | None,
+    expected_header: str | None,
+    expected_seconds: int | None,
 ) -> None:
     """The rebuilt error must keep what only the owner could know.
 
@@ -1433,8 +1446,8 @@ async def test_owner_forward_non_200_carries_local_refusal_provenance(
     """
 
     class FakeResponse:
-        status = 502
-        headers = owner_headers
+        status = 503
+        headers = {**owner_headers, **({"Retry-After": retry_after} if retry_after is not None else {})}
 
         async def __aenter__(self) -> "FakeResponse":
             return self
@@ -1444,8 +1457,8 @@ async def test_owner_forward_non_200_carries_local_refusal_provenance(
 
         async def text(self) -> str:
             return (
-                '{"error":{"message":"The previous response anchor was rejected upstream; '
-                'retry the request.","type":"server_error","code":"stream_incomplete"}}'
+                '{"error":{"message":"The conversation is probing recovery; retry after 42s.",'
+                '"type":"server_error","code":"upstream_request_timeout"}}'
             )
 
     class FakeSession:
@@ -1484,9 +1497,11 @@ async def test_owner_forward_non_200_carries_local_refusal_provenance(
     with pytest.raises(ProxyResponseError) as exc_info:
         await collect()
 
-    assert exc_info.value.status_code == 502
-    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "upstream_request_timeout"
     assert exc_info.value.local_pre_dispatch_refusal is expected_local_refusal
+    assert exc_info.value.retry_after_header == expected_header
+    assert exc_info.value.retry_after_seconds == expected_seconds
 
 
 @pytest.mark.asyncio

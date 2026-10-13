@@ -17666,10 +17666,9 @@ def _denied_anchor_owner_forward_headers(
 ) -> tuple[proxy_module.ResponsesRequest, dict[str, str]]:
     """Sign a native Codex turn the way an origin instance forwards it.
 
-    ``original_request_unanchored`` mirrors what the origin computes for these
-    turns: the affinity is the session header, the client sent no turn-state
-    token, and the client payload carries no ``previous_response_id`` — the
-    anchor for turn two is the one the owner injects itself.
+    The affinity is the session header and the client sends no turn-state
+    token. Denied-anchor cases leave ``previous_response_id`` absent for the
+    owner to inject; admission cases carry an explicit continuation anchor.
     """
     from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
 
@@ -17679,7 +17678,7 @@ def _denied_anchor_owner_forward_headers(
         target_instance="instance-a",
         codex_session_affinity=True,
         downstream_turn_state=None,
-        original_request_unanchored=True,
+        original_request_unanchored=payload.previous_response_id is None,
         original_affinity_kind="session_header",
         original_affinity_key=session_key,
     )
@@ -17704,7 +17703,7 @@ async def test_forwarded_denied_anchor_refusal_marks_the_owner_error_as_a_local_
     and that body cannot express the difference between a refusal the owner
     raised before dispatch and a transport failure it observed: both are
     `stream_incomplete`. The owner therefore marks the response, and
-    ``test_native_codex_owner_forward_denied_anchor_refusal_returns_502_before_commit``
+    ``test_native_codex_owner_forward_local_refusal_preserves_delivery``
     covers what the origin does with the mark (issue #2364).
     """
     from app.modules.proxy import api as proxy_api_module
@@ -17755,10 +17754,25 @@ async def test_forwarded_denied_anchor_refusal_marks_the_owner_error_as_a_local_
 
 
 @pytest.mark.asyncio
-async def test_native_codex_owner_forward_denied_anchor_refusal_returns_502_before_commit(
+@pytest.mark.parametrize(
+    ("status_code", "error_code", "retry_after", "after_commit", "local_refusal"),
+    [
+        (502, "stream_incomplete", None, False, True),
+        (503, "upstream_request_timeout", "42", False, True),
+        (503, "upstream_request_timeout", "42", True, True),
+        (503, "upstream_request_timeout", "42", False, False),
+    ],
+    ids=["denied_anchor", "admission_before_commit", "admission_after_commit", "ambiguous_transport"],
+)
+async def test_native_codex_owner_forward_local_refusal_preserves_delivery(
     async_client,
     app_instance,
     monkeypatch,
+    status_code: int,
+    error_code: str,
+    retry_after: str | None,
+    after_commit: bool,
+    local_refusal: bool,
 ):
     """The origin half must deliver the owner's refusal, not abort its own body.
 
@@ -17770,6 +17784,7 @@ async def test_native_codex_owner_forward_denied_anchor_refusal_returns_502_befo
     lifecycle aborts the committed body, putting issue #2364's zero-byte 200 on
     the origin instead of the owner.
     """
+    from app.modules.proxy import api as proxy_api_module
     from app.modules.proxy.http_bridge_forwarding import HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER
 
     _install_bridge_settings_with_limits(
@@ -17827,21 +17842,30 @@ async def test_native_codex_owner_forward_denied_anchor_refusal_returns_502_befo
             assert instance_id == "instance-a"
             return "http://instance-a"
 
-    # The owner answers exactly as the route above does: the fence's 502
-    # envelope plus the marker that says the owner, not upstream, refused.
+    # The owner answers as the route does: the original refusal and retry
+    # delay, plus the marker distinguishing it from a transport failure.
+    owner_message = (
+        "The previous response anchor was rejected upstream; retry the request."
+        if error_code == "stream_incomplete"
+        else "HTTP responses session bridge is probing recovery for this conversation; retry after 42s."
+    )
     owner_refusal_body = json.dumps(
         {
             "error": {
-                "message": "The previous response anchor was rejected upstream; retry the request.",
+                "message": owner_message,
                 "type": "server_error",
-                "code": "stream_incomplete",
+                "code": error_code,
             }
         }
     )
+    owner_requests = 0
 
     class FakeOwnerResponse:
-        status = 502
-        headers = {HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER: "1"}
+        status = status_code
+        headers = {
+            **({HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER: "1"} if local_refusal else {}),
+            **({"Retry-After": retry_after} if retry_after is not None else {}),
+        }
 
         async def __aenter__(self) -> "FakeOwnerResponse":
             return self
@@ -17863,13 +17887,17 @@ async def test_native_codex_owner_forward_denied_anchor_refusal_returns_502_befo
             return None
 
         def post(self, url: str, **_kwargs: object) -> FakeOwnerResponse:
+            nonlocal owner_requests
             assert url == "http://instance-a/internal/bridge/responses"
+            owner_requests += 1
             return FakeOwnerResponse()
 
     monkeypatch.setattr(
         "app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession",
         FakeOwnerSession,
     )
+    if after_commit:
+        monkeypatch.setattr(proxy_api_module, "_probe_stream_startup_error", _defer_stream_consumption_until_commit)
 
     original_ring = service._ring_membership
     service._ring_membership = cast(Any, Ring())
@@ -17893,11 +17921,168 @@ async def test_native_codex_owner_forward_denied_anchor_refusal_returns_502_befo
     finally:
         service._ring_membership = original_ring
 
-    assert response.status_code == 502, f"native client received {response.status_code} with body {response.text!r}"
-    assert response.json()["error"]["code"] == "stream_incomplete"
+    if not local_refusal:
+        # A Retry-After header alone must not make an ambiguous upstream
+        # transport failure into a proven local refusal.
+        assert response.status_code == 200
+        assert response.content == b""
+    elif retry_after is not None:
+        _assert_native_admission_refusal(
+            response, after_commit=after_commit, retry_after=int(retry_after), message=owner_message
+        )
+    else:
+        assert response.status_code == status_code, response.text
+        assert response.json()["error"]["code"] == error_code
+    assert owner_requests == 1
     # The marker belongs to the internal forward contract; the external client
     # sees only the ordinary error envelope.
     assert HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER not in response.headers
+
+
+async def _defer_stream_consumption_until_commit(stream, **_kwargs):
+    # A zero-duration probe can still observe an immediately ready failure.
+    # Leave the service generator untouched until StreamingResponse has sent
+    # its real HTTP headers and starts consuming the body.
+    return stream, None
+
+
+def _assert_native_admission_refusal(response, *, after_commit: bool, retry_after: int, message: str) -> None:
+    if not after_commit:
+        assert response.status_code == 503, response.text
+        assert response.headers["Retry-After"] == str(retry_after)
+        error = response.json()["error"]
+    else:
+        assert response.status_code == 200
+        events = [
+            json.loads(line[6:])
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        failed = [event for event in events if event.get("type") == "response.failed"]
+        assert len(failed) == 1, response.text
+        error = failed[0]["response"]["error"]
+        assert f"retry: {retry_after * 1000}\n" in response.text
+        assert "_codex_lb_synthetic_transport_failure" not in response.text
+        assert response.text.rstrip().endswith("data: [DONE]")
+    assert error["code"] == "upstream_request_timeout"
+    assert error["message"] == message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_commit", [False, True], ids=["before_commit", "after_commit"])
+@pytest.mark.parametrize(
+    ("guard", "forwarded"),
+    [("cooldown", False), ("half_open", False), ("stale_generation", False), ("half_open", True)],
+    ids=["cooldown", "half_open", "stale_generation", "forwarded_owner"],
+)
+async def test_native_codex_bridge_admission_refusal_reaches_client_without_dispatch(
+    async_client,
+    app_instance,
+    monkeypatch,
+    guard: str,
+    forwarded: bool,
+    after_commit: bool,
+):
+    """A real submit guard must deliver its refusal without spending another upstream turn.
+
+    Arm the blocking state at submit entry, after planning has selected the
+    live session. This models a sibling acquiring the probe between planning
+    and dispatch; constructing a preflagged exception would miss the bug.
+    """
+    from app.modules.proxy import api as proxy_api_module
+    from app.modules.proxy.http_bridge_forwarding import HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER
+
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_settings = proxy_module.get_settings()
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: owner_settings)
+    account_id = await _import_account(async_client, "acc_admission_refusal", "admission-refusal@example.com")
+    account = await _get_account(account_id)
+    upstream = _DeniesAnchoredTurnUpstreamWebSocket()
+    _install_denied_anchor_bridge_fakes(monkeypatch, account=account, upstream=upstream)
+    service = get_proxy_service_for_app(app_instance)
+    session_key = "native-admission-refusal-session"
+    turn_one, turn_two = _denied_anchor_turn_inputs()
+
+    async def post_turn(client, input_items, *, previous_response_id: str | None = None):
+        body = {"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": input_items}
+        if previous_response_id is not None:
+            body["previous_response_id"] = previous_response_id
+        if forwarded:
+            payload, headers = _denied_anchor_owner_forward_headers(body, session_key=session_key)
+            return await client.post(
+                "/internal/bridge/responses", json=payload.model_dump_for_forwarding(), headers=headers
+            )
+        return await client.post(
+            "/backend-api/codex/responses",
+            json=body,
+            headers={"session_id": session_key, "user-agent": "codex_exec/0.153.4"},
+        )
+
+    def arm_circuit(key, *, half_open: bool) -> None:
+        now = time.monotonic()
+        cast(Any, service)._http_bridge_retry_circuits[key] = (
+            http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+                consecutive_failures=2,
+                cooldown_until=0.0 if half_open else now + 42.0,
+                half_open_until=now + 42.0 if half_open else 0.0,
+                last_detail="stream_idle_timeout",
+                last_touched_monotonic=now,
+            )
+        )
+
+    async with _client_reporting_committed_stream_failures(app_instance) as client:
+        first = await post_turn(client, turn_one)
+        assert first.status_code == 200, first.text
+        assert len(upstream.sent_text) == 1
+        real_submit = service._submit_http_bridge_request_with_handoff
+        refusals: list[proxy_module.ProxyResponseError] = []
+
+        async def submit_with_admission_race(session, **kwargs):
+            request_state = kwargs["request_state"]
+            assert request_state.previous_response_id is not None
+            assert request_state.fresh_upstream_request_is_retry_safe is False
+            if guard == "stale_generation":
+                request_state.verified_stale_anchor_replay = True
+                request_state.verified_stale_anchor_retry_circuit_generation_captured = True
+                request_state.verified_stale_anchor_retry_circuit_key = session.key
+                request_state.verified_stale_anchor_retry_circuit_generation = None
+            else:
+                arm_circuit(session.key, half_open=guard == "half_open")
+            try:
+                await real_submit(session, **kwargs)
+            except proxy_module.ProxyResponseError as exc:
+                refusals.append(exc)
+                raise
+
+        async def lose_generation_claim(*, key, captured, generation):
+            assert captured is True
+            assert generation is None
+            arm_circuit(key, half_open=True)
+            return False
+
+        monkeypatch.setattr(service, "_submit_http_bridge_request_with_handoff", submit_with_admission_race)
+        monkeypatch.setattr(service, "_load_http_bridge_retry_circuit", AsyncMock(return_value=True))
+        if guard == "stale_generation":
+            monkeypatch.setattr(service, "_claim_http_bridge_retry_circuit_generation", lose_generation_claim)
+        if after_commit:
+            monkeypatch.setattr(proxy_api_module, "_probe_stream_startup_error", _defer_stream_consumption_until_commit)
+        response = await post_turn(client, turn_two[-1:], previous_response_id=f"{upstream.response_id_prefix}_1")
+
+    assert len(refusals) == 1
+    refusal = refusals[0]
+    assert refusal.status_code == 503
+    assert refusal.retry_after_seconds is not None and 0 < refusal.retry_after_seconds <= 42
+    _assert_native_admission_refusal(
+        response,
+        after_commit=after_commit,
+        retry_after=refusal.retry_after_seconds,
+        message=refusal.payload["error"]["message"],
+    )
+    if forwarded and not after_commit:
+        assert response.headers[HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER] == "1"
+    else:
+        assert HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER not in response.headers
+    assert len(upstream.sent_text) == 1, "the refused request dispatched another upstream frame"
 
 
 # --- Reproduction for #1384 takeover (narrowed scope): accepted, output-free capacity failure ---

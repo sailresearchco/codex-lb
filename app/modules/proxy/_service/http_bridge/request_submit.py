@@ -113,6 +113,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_http_bridge_prewarm_outcome,
     _register_http_bridge_turn_state_aliases_locked,
     _release_http_bridge_unanchored_handoff,
+    _retain_http_bridge_retired_probes_locked,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_session_key_poison_quarantined,
@@ -179,6 +180,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
+    _HTTPBridgeHalfOpenProbe,
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
@@ -1030,10 +1032,16 @@ class _HTTPBridgeRequestSubmitMixin:
                     if (
                         unused_probe_state is not None
                         and unused_probe_state.half_open_until == request_state.claimed_half_open_until
+                        and (
+                            request_state.claimed_half_open_probe is None
+                            or unused_probe_state.half_open_probe is request_state.claimed_half_open_probe
+                        )
                     ):
                         unused_probe_state.half_open_until = 0.0
+                        unused_probe_state.half_open_probe = None
                         unused_probe_state.cooldown_until = clock_for(self).monotonic() - 1.0
                 request_state.claimed_half_open_until = 0.0
+                request_state.claimed_half_open_probe = None
             # Inner pre-submit cleanup may clear the reservation before control
             # returns here, so ownership must be captured before awaiting it.
             # Only that request, or one whose pre-dispatch exit just released
@@ -1086,10 +1094,12 @@ class _HTTPBridgeRequestSubmitMixin:
             and request_state.replay_count == 0
         )
         admission_claimed_leases: list[float] = []
+        admission_claimed_probes: list[_HTTPBridgeHalfOpenProbe] = []
         retry_allowed = await self._http_bridge_precreated_retry_allowed(
             session,
             allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay,
             claimed_lease_out=admission_claimed_leases,
+            claimed_probe_out=admission_claimed_probes,
         )
         # The exact lease this admission claimed, handed out by the claim
         # itself under its own lock: empty when this request claimed
@@ -1098,6 +1108,8 @@ class _HTTPBridgeRequestSubmitMixin:
         # interleaving.
         claimed_half_open_until = admission_claimed_leases[-1] if admission_claimed_leases else 0.0
         request_state.claimed_half_open_until = claimed_half_open_until
+        if admission_claimed_probes:
+            request_state.claimed_half_open_probe = admission_claimed_probes[-1]
         if not retry_allowed:
             block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
             retry_after_seconds = max(1, math.ceil(block_seconds))
@@ -1131,6 +1143,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     _http_bridge_retry_circuit_suppression_message(block_reason, retry_after_seconds),
                 ),
                 retry_after_seconds=retry_after_seconds,
+                local_pre_dispatch_refusal=True,
             )
             if _http_bridge_cooldown_suppression_is_replay_safe(request_state):
                 setattr(cooldown_error, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
@@ -2183,6 +2196,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                     ),
                                 ),
                                 retry_after_seconds=suppressed_retry_after_seconds,
+                                local_pre_dispatch_refusal=True,
                             )
                     async with session.pending_lock:
                         session.pending_requests.append(request_state)
@@ -3267,6 +3281,7 @@ class _HTTPBridgeRequestSubmitMixin:
         def decide_locked() -> bool:
             unowned = _http_bridge_session_unowned_locked(session)
             if unowned:
+                _retain_http_bridge_retired_probes_locked(session)
                 session.pending_requests.clear()
                 session.upstream_close_attempted = True
             return unowned
@@ -3720,6 +3735,7 @@ class _HTTPBridgeRequestSubmitMixin:
         # suppressing traffic for up to the full window with no probe in
         # flight — the same handback contract the submit finalizer applies.
         admission_claimed_leases: list[float] = []
+        admission_claimed_probes: list[_HTTPBridgeHalfOpenProbe] = []
         retry_send_baselines: list[tuple[_WebSocketRequestState, int]] = []
         try:
             return await self._retry_http_bridge_precreated_request_admitted(
@@ -3727,6 +3743,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 restart_reader=restart_reader,
                 admission_claimed_leases=admission_claimed_leases,
+                admission_claimed_probes=admission_claimed_probes,
                 retry_send_baselines=retry_send_baselines,
             )
         finally:
@@ -3741,8 +3758,13 @@ class _HTTPBridgeRequestSubmitMixin:
                         if (
                             unused_probe_state is not None
                             and unused_probe_state.half_open_until == retry_claimed_half_open_until
+                            and (
+                                not admission_claimed_probes
+                                or unused_probe_state.half_open_probe is admission_claimed_probes[-1]
+                            )
                         ):
                             unused_probe_state.half_open_until = 0.0
+                            unused_probe_state.half_open_probe = None
                             unused_probe_state.cooldown_until = clock_for(self).monotonic() - 1.0
 
     async def _retry_http_bridge_precreated_request_admitted(
@@ -3752,6 +3774,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
         admission_claimed_leases: list[float] | None = None,
+        admission_claimed_probes: list[_HTTPBridgeHalfOpenProbe] | None = None,
         retry_send_baselines: list[tuple[_WebSocketRequestState, int]] | None = None,
     ) -> bool:
         clock = clock_for(self)
@@ -3827,6 +3850,7 @@ class _HTTPBridgeRequestSubmitMixin:
             allow_fresh_hard_account_switch=fresh_hard_request_account_switch_candidate,
             allow_proof_gated_continuity_replay=proof_gated_continuity_replay_candidate,
             claimed_lease_out=admission_claimed_leases,
+            claimed_probe_out=admission_claimed_probes,
         ):
             return False
 
@@ -3876,6 +3900,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 # prior attempts, so the release keys on advancement past
                 # this point, not on a zero count.
                 retry_send_baselines.append((request_state, request_state.response_create_attempt_count))
+            if admission_claimed_probes:
+                request_state.claimed_half_open_probe = admission_claimed_probes[-1]
             model_fallback_replay = request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
             if request_state.previous_response_id is not None and not (
                 request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text

@@ -3,7 +3,9 @@
 ## Purpose
 
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
+
 ## Requirements
+
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
 For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
@@ -10935,3 +10937,119 @@ replay limits, or the ban on replay after visible response output.
 - **GIVEN** a full resend passes the same-owner proof and contains an agent message
 - **WHEN** its durable owner is unavailable
 - **THEN** no alternate account receives the request
+
+### Requirement: Matched terminal failures return their own bridge recovery probe
+
+When an admitted HTTP bridge recovery probe receives its matched upstream terminal failure, the proxy MUST return that request's recovery reservation if the existing circuit outcome policy does not otherwise settle it. The proxy MUST NOT keep treating a completed probe as active until its lease expires.
+
+Returning the reservation MUST be fenced to the circuit episode and reservation claimed by that request. It MUST NOT release a newer probe or erase newer failure counts, cooldowns, or anchor quarantine. An unmatched terminal MUST NOT settle a pending request's reservation. The next admission MUST permit at most one replacement probe.
+
+The proxy MUST preserve existing upstream failure classification and account ownership. It MUST NOT classify every upstream `server_error` as a transport failure or anchor rejection merely to release the reservation.
+
+#### Scenario: A server error does not hold the conversation for ten minutes
+
+- **GIVEN** a conversation's recovery probe has been admitted and sent upstream
+- **WHEN** that probe receives its matched `server_error` terminal
+- **THEN** its recovery reservation is returned without waiting for lease expiry
+- **AND** the next eligible retry can compete for a single replacement probe
+
+#### Scenario: A late terminal cannot release a successor
+
+- **GIVEN** a newer circuit episode or probe supersedes the failed request's reservation
+- **WHEN** the old request's terminal is settled
+- **THEN** the newer episode and reservation remain unchanged
+
+#### Scenario: Concurrent retries preserve single-probe admission
+
+- **GIVEN** a completed probe has returned its reservation
+- **WHEN** multiple retries attempt recovery concurrently
+- **THEN** at most one is admitted to send upstream
+- **AND** the other retries retain a visible bounded refusal
+
+### Requirement: Bridge admission refusals remain visible to native clients
+
+The HTTP bridge's submit retry-circuit and stale replay-generation guards MUST record refusals as local pre-dispatch failures. The guards MUST retain their existing status, error code, retry delay, and prevention of upstream dispatch.
+
+Before downstream response commitment, the proxy MUST return the refusal's HTTP status, error envelope, and `Retry-After`. After commitment, it MUST emit the existing unmarked terminal `response.failed` and retry hint, followed by `[DONE]`. A local refusal MUST NOT become an empty successful stream.
+
+Internal owner forwarding MUST preserve local refusal provenance and a valid bounded retry delay for both HTTP and committed-stream delivery. Unmarked ambiguous upstream transport failures MUST retain their existing delivery policy.
+
+#### Scenario: A refused recovery retry is visible before commitment
+
+- **GIVEN** a native Codex request is blocked by the retry-circuit submission guard
+- **WHEN** downstream headers have not committed
+- **THEN** it receives HTTP 503, the original error, and `Retry-After`
+- **AND** no upstream frame is sent for that refused request
+
+#### Scenario: A refusal after commitment terminates the stream explicitly
+
+- **GIVEN** a native request has already received HTTP 200 headers
+- **WHEN** either local submission guard refuses dispatch
+- **THEN** the client receives one unmarked `response.failed`, the retry hint, and `[DONE]`
+- **AND** no upstream frame is sent for that refused request
+
+#### Scenario: Owner forwarding retains the retry delay
+
+- **GIVEN** the owning instance returns a local pre-dispatch refusal with `Retry-After`
+- **WHEN** the origin reconstructs the failure
+- **THEN** it retains both refusal provenance and the validated retry delay
+- **AND** the client receives the same refusal policy as a locally owned request
+
+### Requirement: Fresh-reattach anchor injection exposes bounded proof diagnostics
+
+Both `fresh_reattach_anchor_injected` branches SHALL include the existing anchor
+rejection classification, whether the original payload is full-resend shaped,
+the durable stored input-item count, the computed context-retention result,
+the known pending-tool-manifest count, and whether a same-owner full-resend proof
+is present. The diagnostics SHALL distinguish an unknown tool manifest from an
+empty manifest and SHALL identify context evaluation skipped by an earlier
+anchor rejection.
+
+The diagnostics MUST reuse the current classification results without changing
+replay eligibility, account ownership, anchor injection, or request dispatch.
+They MUST NOT add message content, ciphertext, tool names or arguments, item
+identifiers, fingerprints, or identifiers beyond the existing event fields.
+
+#### Scenario: Stored anchor metadata rejects a full resend
+- **GIVEN** an original full-resend-shaped payload whose existing anchor check fails
+- **WHEN** a fresh bridge injects the durable anchor
+- **THEN** the event reports that anchor rejection and the stored item count
+- **AND** context retention is reported as not checked
+
+#### Scenario: Context or sealed same-owner proof refuses preservation
+- **GIVEN** the existing anchor check passes
+- **WHEN** a fresh bridge injects the anchor instead of preserving the original full resend
+- **THEN** the event reports the computed context-retention result and proof presence
+- **AND** a missing pending-tool manifest is distinguishable from a known empty manifest
+
+### Requirement: Completed bridge retirement returns owned recovery probes
+
+When bridge retirement removes a dispatched request without an upstream terminal event, the service MUST preserve its owned half-open probe until the actual upstream reader has stopped and socket closure has succeeded. Completed retirement MUST return that probe only when its claim and circuit episode still match. The return MUST preserve failure counts, cooldowns, poison evidence, and newer probe ownership, and MUST permit at most one replacement probe.
+
+#### Scenario: Cancelled probe completes resource retirement
+- **GIVEN** a dispatched half-open probe whose downstream request is cancelled
+- **WHEN** no active sibling or admission waiter remains and its reader and socket finish closing
+- **THEN** its still-owned probe SHALL be returned
+- **AND** concurrent replacement requests SHALL admit at most one probe
+
+#### Scenario: Bounded close wait ends before resource cleanup
+- **GIVEN** retirement owns a probe whose reader or socket has not finished closing
+- **WHEN** a bounded caller wait expires or is cancelled
+- **THEN** the service SHALL retain cleanup ownership
+- **AND** the probe SHALL NOT be returned before actual successful transport closure
+
+#### Scenario: Active sibling prevents retirement
+- **GIVEN** a cancelled probe shares a session with an active request or admission waiter
+- **WHEN** retirement checks session ownership
+- **THEN** the cancelled probe SHALL remain reserved until resource retirement can complete
+
+#### Scenario: The upstream reader initiates retirement
+- **GIVEN** a cancelled probe remains reserved while a sibling is active
+- **WHEN** the reader processes the sibling's terminal event and initiates successful socket closure
+- **THEN** the probe SHALL remain reserved until that reader exits
+- **AND** reader completion SHALL schedule owned cleanup that returns only the captured still-owned probe
+
+#### Scenario: Incomplete cleanup or a newer circuit episode
+- **GIVEN** resource cleanup leaves a reader running, socket closure fails, or a newer circuit episode or probe supersedes the retired request
+- **WHEN** retirement attempts to settle the old probe
+- **THEN** the service SHALL NOT clear the live or newer reservation
