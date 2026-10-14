@@ -48487,9 +48487,12 @@ def test_filter_accounts_for_model_treats_omit_equivalent_service_tiers_as_unfil
     ]
 
 
-def test_filter_accounts_for_model_uses_authoritative_account_capabilities(monkeypatch):
+@pytest.mark.parametrize("plan_type,allowed_plans", [("plus", None), ("promax", frozenset({"pro"}))])
+def test_filter_accounts_for_model_uses_authoritative_account_capabilities(monkeypatch, plan_type, allowed_plans):
     supported = _make_account("acc_filter_supported")
     unsupported = _make_account("acc_filter_unsupported")
+    supported.plan_type = plan_type
+    unsupported.plan_type = plan_type
 
     class Registry:
         def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
@@ -48498,7 +48501,7 @@ def test_filter_accounts_for_model_uses_authoritative_account_capabilities(monke
 
         def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
             assert slug == "gpt-5.6-sol"
-            return None
+            return allowed_plans
 
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: Registry())
 
