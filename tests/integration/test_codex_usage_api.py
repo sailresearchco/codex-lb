@@ -274,6 +274,60 @@ async def test_codex_usage_monthly_free_exhaustion_does_not_block_paid_capacity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("weekly_window", ["primary", "secondary"])
+async def test_codex_usage_promax_upgrade_ignores_stale_monthly_exhaustion(async_client, db_setup, weekly_window):
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    account_id = "acc_upgraded_max"
+    async with SessionLocal() as session:
+        account = await AccountsRepository(session).upsert(
+            _make_account(
+                account_id,
+                "upgraded-max@example.com",
+                chatgpt_account_id="workspace_upgraded_max",
+                plan_type="free",
+            )
+        )
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id,
+            100.0,
+            recorded_at=now - timedelta(days=1),
+            window="monthly",
+            reset_at=now_epoch + 20 * 24 * 3600,
+            window_minutes=43200,
+        )
+        account.plan_type = "promax"
+        await session.commit()
+        await usage_repo.add_entry(
+            account_id,
+            20.0,
+            recorded_at=now,
+            window=weekly_window,
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=10080,
+        )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_upgraded_max",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["plan_type"] == "promax"
+    rate_limit = payload["rate_limit"]
+    assert rate_limit["allowed"] is True
+    assert rate_limit["limit_reached"] is False
+    assert rate_limit["primary_window"] is None
+    assert rate_limit["secondary_window"]["used_percent"] == 20
+    assert rate_limit["secondary_window"]["limit_window_seconds"] == 604800
+
+
+@pytest.mark.asyncio
 async def test_codex_usage_header_ignored(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

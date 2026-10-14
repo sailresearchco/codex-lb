@@ -2279,6 +2279,58 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
 
 
+@pytest.mark.parametrize("routing_strategy", ["capacity_weighted", "relative_availability"])
+@pytest.mark.parametrize("weekly_window", ["primary", "secondary"])
+def test_promax_mixed_pool_routing_preserves_exhaustion_and_unknown_allowance(routing_strategy, weekly_window):
+    now = 1_700_000_000.0
+    states = []
+    for account_id, plan, status, used in (
+        ("pro", "pro", AccountStatus.ACTIVE, 20.0),
+        ("max", "promax", AccountStatus.ACTIVE, 20.0),
+        ("blocked-max", "promax", AccountStatus.QUOTA_EXCEEDED, 100.0),
+    ):
+        blocked = status == AccountStatus.QUOTA_EXCEEDED
+        weekly = _make_test_usage(
+            account_id=account_id,
+            window=weekly_window,
+            used_percent=used,
+            reset_at=int(now + 604800),
+            recorded_at=_epoch_to_naive_utc(now - 5),
+            window_minutes=10080,
+        )
+        states.append(
+            _state_from_account(
+                account=_make_test_account(
+                    account_id=account_id,
+                    plan_type=plan,
+                    status=status,
+                    reset_at=int(now + 604800) if blocked else None,
+                    blocked_at=int(now - 10) if blocked else None,
+                ),
+                primary_entry=weekly if weekly_window == "primary" else None,
+                secondary_entry=weekly if weekly_window == "secondary" else None,
+                runtime=RuntimeState(leased_tokens=1000),
+                now=now,
+            )
+        )
+
+    # Exercise the real state builder and mixed-pool selection. A singleton
+    # could succeed through the all-zero fallback while starving in this pool.
+    selected_ids = set()
+    for thread in range(32):
+        result = select_account(states, routing_strategy=routing_strategy, now=now, selection_seed=f"thread-{thread}")
+        assert result.account is not None
+        selected_ids.add(result.account.account_id)
+    assert selected_ids == {"pro", "max"}
+    assert states[2].status == AccountStatus.QUOTA_EXCEEDED
+    assert states[1].plan_type == "promax"
+    assert states[1].used_percent is None
+    assert states[1].secondary_used_percent == states[0].secondary_used_percent
+    assert states[1].secondary_used_percent is not None and states[1].secondary_used_percent > 20.0
+    for window in ("primary", "secondary", "monthly"):
+        assert usage_core.capacity_for_plan("promax", window) is None
+
+
 def test_state_from_account_keeps_active_account_selectable_when_primary_usage_snapshot_is_exhausted(
     monkeypatch,
 ):

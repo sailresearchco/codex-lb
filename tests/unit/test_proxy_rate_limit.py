@@ -272,6 +272,61 @@ async def test_rate_limit_payload_serializes_usage_reads(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "primary_used,secondary_used,include_exhausted_pro",
+    [(20.0, 30.0, False), (100.0, 30.0, False), (20.0, 100.0, False), (20.0, 30.0, True)],
+)
+async def test_rate_limit_payload_promax_percentage_only_availability(
+    monkeypatch, primary_used, secondary_used, include_exhausted_pro
+):
+    monkeypatch.setattr("app.modules.proxy._service.rate_limit.time.time", lambda: _NOW_EPOCH)
+    guard = _SharedSessionGuard()
+    accounts = [_account("max", plan_type="promax")]
+    primary = _usage(
+        1, account_id="max", window="primary", used_percent=primary_used, reset_after=300, window_minutes=300
+    )
+    secondary = _usage(
+        2,
+        account_id="max",
+        window="secondary",
+        used_percent=secondary_used,
+        reset_after=604800,
+        window_minutes=10080,
+    )
+    rows = {"primary": {"max": primary}, "secondary": {"max": secondary}, "monthly": {}, None: {"max": secondary}}
+    if include_exhausted_pro:
+        accounts.append(_account("pro", plan_type="pro"))
+        rows["secondary"]["pro"] = _usage(
+            3,
+            account_id="pro",
+            window="secondary",
+            used_percent=100.0,
+            reset_after=604800,
+            window_minutes=10080,
+        )
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+        yield ProxyRepositories(
+            accounts=cast(AccountsRepository, _GuardedAccountsRepository(guard, accounts)),
+            usage=cast(UsageRepository, _GuardedUsageRepository(guard, rows)),
+            request_logs=cast(RequestLogsRepository, object()),
+            sticky_sessions=cast(StickySessionsRepository, object()),
+            api_keys=cast(ApiKeysRepository, object()),
+            additional_usage=cast(AdditionalUsageRepository, _GuardedAdditionalUsageRepository(guard)),
+            quota_planner=cast(QuotaPlannerRepository, object()),
+        )
+
+    payload = await _TestRateLimitService(repo_factory).get_rate_limit_payload()
+
+    assert payload.plan_type == "promax"
+    assert payload.rate_limit is not None
+    available = primary_used < 100.0 and secondary_used < 100.0
+    assert payload.rate_limit.allowed is available
+    assert payload.rate_limit.limit_reached is not available
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_payload_detaches_pre_refresh_rows() -> None:
     session = _FakeSession()
     service, _ = _service_and_guard(session=session)
