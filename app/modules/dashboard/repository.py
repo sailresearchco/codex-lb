@@ -184,21 +184,18 @@ class DashboardRepository:
         now: datetime,
         per_metric_limit: int = 3,
     ) -> list[ApiKeyAttributionRow]:
-        key_name = func.coalesce(func.nullif(ApiKey.name, ""), "(unnamed)")
         billable_tokens = func.coalesce(RequestLog.input_tokens, 0) + func.coalesce(
             RequestLog.output_tokens, RequestLog.reasoning_tokens, 0
         )
         grouped_models = (
             select(
                 RequestLog.api_key_id.label("api_key_id"),
-                key_name.label("name"),
                 RequestLog.model.label("model"),
                 func.count(RequestLog.id).label("requests"),
                 func.coalesce(func.sum(billable_tokens), 0).label("billable_tokens"),
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_tokens"),
             )
             .select_from(RequestLog)
-            .outerjoin(ApiKey, ApiKey.id == RequestLog.api_key_id)
             .where(
                 RequestLog.requested_at >= since,
                 RequestLog.requested_at <= now,
@@ -207,7 +204,7 @@ class DashboardRepository:
                 # top consumers, matching the request-log usage queries.
                 RequestLogsRepository._exclude_warmup_clause(),
             )
-            .group_by(RequestLog.api_key_id, key_name, RequestLog.model)
+            .group_by(RequestLog.api_key_id, RequestLog.model)
             .cte("weekly_pace_key_models")
         )
         ranked_models = select(
@@ -226,7 +223,6 @@ class DashboardRepository:
         key_totals = (
             select(
                 ranked_models.c.api_key_id,
-                func.max(ranked_models.c.name).label("name"),
                 func.sum(ranked_models.c.requests).label("requests"),
                 func.sum(ranked_models.c.billable_tokens).label("billable_tokens"),
                 func.sum(ranked_models.c.cached_tokens).label("cached_tokens"),
@@ -264,15 +260,20 @@ class DashboardRepository:
             select(top_by_requests),
             select(top_by_billable),
         ).cte("weekly_pace_key_candidates")
+        # Names do not affect ranking. Resolve them only for the bounded
+        # candidate set instead of looking up each raw request's key.
+        key_name = func.coalesce(func.nullif(ApiKey.name, ""), "(unnamed)")
         statement = (
             select(
                 candidates.c.api_key_id,
-                func.max(candidates.c.name).label("name"),
+                func.max(key_name).label("name"),
                 func.max(candidates.c.requests).label("requests"),
                 func.max(candidates.c.billable_tokens).label("billable_tokens"),
                 func.max(candidates.c.cached_tokens).label("cached_tokens"),
                 func.max(candidates.c.dominant_model).label("dominant_model"),
             )
+            .select_from(candidates)
+            .outerjoin(ApiKey, ApiKey.id == candidates.c.api_key_id)
             .group_by(candidates.c.api_key_id)
             .order_by(
                 func.max(candidates.c.requests).desc(),

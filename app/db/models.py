@@ -475,7 +475,7 @@ class RequestLog(Base):
     __tablename__ = "request_logs"
     __table_args__ = (
         Index("idx_logs_useragent_group", "useragent_group"),
-        Index("idx_logs_conversation_id", "conversation_id"),
+        Index("idx_logs_conversation_deleted", "conversation_id", "deleted_at"),
         Index("idx_logs_client_ip", "client_ip"),
     )
 

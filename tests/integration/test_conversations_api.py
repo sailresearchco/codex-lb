@@ -257,6 +257,84 @@ async def test_conversation_list_pagination_and_stable_order(async_client, db_se
 
 
 @pytest.mark.asyncio
+async def test_conversation_pages_order_by_latest_eligible_activity_and_keep_full_history(async_client, db_setup):
+    base = utcnow().replace(microsecond=0)
+    since = base - timedelta(days=7)
+    rows = [
+        ("page-a", base - timedelta(days=60), "other", 100, "old-model"),
+        ("page-a", base - timedelta(days=2), "editor", 10, "current-model"),
+        ("page-a", base - timedelta(hours=1), "other", 5, "current-model"),
+        ("page-b", base - timedelta(days=1), "editor", 20, "current-model"),
+        ("page-b", base - timedelta(hours=1), "other", 10, "current-model"),
+        ("page-c", base - timedelta(days=6), "editor", 30, "current-model"),
+        ("page-c", base - timedelta(minutes=30), "other", 15, "current-model"),
+        # An old search match cannot qualify otherwise recent activity.
+        ("old-match", base - timedelta(days=60), "editor", 100, "old-model"),
+        ("old-match", base - timedelta(minutes=5), "other", 100, "current-model"),
+        ("inactive", base - timedelta(days=60), "editor", 100, "old-model"),
+    ]
+    async with SessionLocal() as session:
+        logs = RequestLogsRepository(session)
+        for index, (conversation_id, requested_at, useragent_group, tokens, model) in enumerate(rows):
+            await logs.add_log(
+                account_id=None,
+                request_id=f"page-row-{index}",
+                model=model,
+                input_tokens=tokens,
+                output_tokens=1,
+                latency_ms=1,
+                status="success",
+                error_code=None,
+                requested_at=requested_at,
+                useragent_group=useragent_group,
+                conversation_id=conversation_id,
+                cost_usd=1.25,
+            )
+        for request_id, conversation_id, request_kind in [
+            ("page-warmup", "page-a", RequestKind.WARMUP.value),
+            ("page-deleted", "page-b", RequestKind.NORMAL.value),
+        ]:
+            await logs.add_log(
+                account_id=None,
+                request_id=request_id,
+                model="excluded-model",
+                input_tokens=999,
+                output_tokens=999,
+                latency_ms=1,
+                status="success",
+                error_code=None,
+                requested_at=base,
+                useragent_group="editor",
+                conversation_id=conversation_id,
+                request_kind=request_kind,
+            )
+        await session.execute(update(RequestLog).where(RequestLog.request_id == "page-deleted").values(deleted_at=base))
+        await session.commit()
+
+    pages = []
+    for offset in range(4):
+        response = await async_client.get(
+            "/api/conversations",
+            params={"since": since.isoformat(), "search": "EDITOR", "limit": 1, "offset": offset},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 3
+        assert body["hasMore"] is (offset < 2)
+        pages.append(body["conversations"])
+
+    assert [page[0]["conversationId"] for page in pages[:3]] == ["page-c", "page-a", "page-b"]
+    assert pages[3] == []
+    full_history = pages[1][0]
+    assert full_history["requestCount"] == 3
+    assert full_history["totalTokens"] == 118
+    assert full_history["totalCostUsd"] == pytest.approx(3.75)
+    assert datetime.fromisoformat(full_history["firstRequest"]).replace(tzinfo=None) == base - timedelta(days=60)
+    assert datetime.fromisoformat(full_history["lastRequest"]).replace(tzinfo=None) == base - timedelta(hours=1)
+    assert full_history["remainingModelCount"] == 1
+
+
+@pytest.mark.asyncio
 async def test_conversation_list_trailing_slash_preserves_collection_route(async_client, db_setup):
     base = utcnow().replace(microsecond=0)
     await _seed_conversations(base)

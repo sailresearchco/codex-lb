@@ -298,9 +298,39 @@ class RequestLogsRepository:
         else:
             conditions = base_conditions
 
+        count_stmt = select(func.count(func.distinct(conversation_id))).where(*candidate_conditions)
+        ttl_seconds = _COUNT_CACHE_TTL_SECONDS
+        if ttl_seconds <= 0:
+            total = int((await self._session.execute(count_stmt)).scalar_one())
+        else:
+            normalized_search = (search.strip() or None) if search else None
+            if cache_mode == "timeframe":
+                mode_token = ("timeframe", timeframe)
+            else:
+                mode_token = ("since", since)
+            cache_key = ("conversation-count", normalized_search, mode_token)
+            total = _cached_recent_count(cache_key)
+            if total is None:
+                total = int((await self._session.execute(count_stmt)).scalar_one())
+                _store_recent_count(cache_key, total, ttl_seconds)
+
+        # Every candidate has an eligible in-window row, so its latest row is
+        # also in-window. Search qualifies IDs; it must not restrict which row
+        # determines their ordering. Read full history only after pagination.
+        page_conditions = [*conditions]
+        if since is not None:
+            page_conditions.append(RequestLog.requested_at >= since)
+        page = (
+            select(conversation_id.label("conversation_id"))
+            .where(*page_conditions)
+            .group_by(conversation_id)
+            .order_by(func.max(RequestLog.requested_at).desc(), conversation_id.asc())
+            .offset(offset)
+            .limit(limit)
+            .subquery("conversation_page")
+        )
         output = self._conversation_output_expr()
         cached = self._conversation_cached_expr()
-        summary_conditions = [*conditions]
         summary_stmt = (
             select(
                 conversation_id.label("conversation_id"),
@@ -312,42 +342,11 @@ class RequestLogsRepository:
                 func.sum(cached).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             )
-            .where(*summary_conditions)
+            .where(*base_conditions, conversation_id.in_(select(page.c.conversation_id)))
             .group_by(conversation_id)
+            .order_by(func.max(RequestLog.requested_at).desc(), conversation_id.asc())
         )
-        summary_subquery = summary_stmt.subquery()
-        filtered_summary_stmt = select(summary_subquery)
-        ttl_seconds = _COUNT_CACHE_TTL_SECONDS
-        if ttl_seconds <= 0:
-            total = int(
-                (
-                    await self._session.execute(select(func.count()).select_from(filtered_summary_stmt.subquery()))
-                ).scalar_one()
-            )
-        else:
-            normalized_search = (search.strip() or None) if search else None
-            if cache_mode == "timeframe":
-                mode_token = ("timeframe", timeframe)
-            else:
-                mode_token = ("since", since)
-            cache_key = ("conversation-count", normalized_search, mode_token)
-            total = _cached_recent_count(cache_key)
-            if total is None:
-                total = int(
-                    (
-                        await self._session.execute(select(func.count()).select_from(filtered_summary_stmt.subquery()))
-                    ).scalar_one()
-                )
-                _store_recent_count(cache_key, total, ttl_seconds)
-        page_rows = (
-            await self._session.execute(
-                filtered_summary_stmt.order_by(
-                    summary_subquery.c.last_requested_at.desc(), summary_subquery.c.conversation_id.asc()
-                )
-                .offset(offset)
-                .limit(limit)
-            )
-        ).all()
+        page_rows = (await self._session.execute(summary_stmt)).all()
         summaries = [
             ConversationListSummary(
                 conversation_id=row.conversation_id,
@@ -371,10 +370,9 @@ class RequestLogsRepository:
             # activity in the window. Facets must describe the same full
             # eligible conversation rows as that summary, including history
             # before `since`.
-            facet_conditions = [*conditions]
-            account_facets = await self._conversation_facets(facet_conditions, page_ids, RequestLog.account_id)
-            api_key_facets = await self._conversation_facets(facet_conditions, page_ids, RequestLog.api_key_id)
-            model_facets = await self._conversation_facets(facet_conditions, page_ids, RequestLog.model)
+            account_facets = await self._conversation_facets(base_conditions, page_ids, RequestLog.account_id)
+            api_key_facets = await self._conversation_facets(base_conditions, page_ids, RequestLog.api_key_id)
+            model_facets = await self._conversation_facets(base_conditions, page_ids, RequestLog.model)
         return ConversationListResult(
             summaries=summaries,
             account_facets=account_facets,
@@ -392,7 +390,9 @@ class RequestLogsRepository:
         conversation_id = RequestLog.conversation_id
         facet_conditions = [*conditions, conversation_id.in_(page_ids), value_column.is_not(None)]
         if getattr(value_column, "key", None) == RequestLog.api_key_id.key:
-            facet_conditions.append(value_column.in_(select(ApiKey.id)))
+            # Keep key existence correlated so SQLite reads the page's
+            # conversation rows before probing the key inventory.
+            facet_conditions.append(select(ApiKey.id).where(ApiKey.id == value_column).exists())
         stmt = (
             select(
                 conversation_id.label("conversation_id"),
