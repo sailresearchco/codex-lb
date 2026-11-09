@@ -11,7 +11,7 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
-from app.dependencies import ApiKeysContext, get_api_keys_context
+from app.dependencies import ApiKeysContext, get_api_keys_context, get_api_keys_read_context
 from app.modules.api_keys.repository import ApiKeyOwnerDisabledError
 from app.modules.api_keys.schemas import (
     ApiKeyAccountCostResponse,
@@ -186,7 +186,7 @@ async def create_api_key(
 @router.get("", response_model=list[ApiKeyResponse], include_in_schema=False)
 @router.get("/", response_model=list[ApiKeyResponse])
 async def list_api_keys(
-    context: ApiKeysContext = Depends(get_api_keys_context),
+    context: ApiKeysContext = Depends(get_api_keys_read_context),
 ) -> list[ApiKeyResponse]:
     rows = await context.service.list_keys()
     return [_to_response(row) for row in rows]
@@ -304,7 +304,7 @@ async def regenerate_api_key(
 @router.get("/{key_id}/trends", response_model=ApiKeyTrendsResponse)
 async def get_api_key_trends(
     key_id: str,
-    context: ApiKeysContext = Depends(get_api_keys_context),
+    context: ApiKeysContext = Depends(get_api_keys_read_context),
 ) -> ApiKeyTrendsResponse:
     from app.modules.api_keys.schemas import ApiKeyTrendPoint
 
@@ -321,7 +321,7 @@ async def get_api_key_trends(
 @router.get("/{key_id}/usage-7d", response_model=ApiKeyUsage7DayResponse)
 async def get_api_key_usage_7d(
     key_id: str,
-    context: ApiKeysContext = Depends(get_api_keys_context),
+    context: ApiKeysContext = Depends(get_api_keys_read_context),
 ) -> ApiKeyUsage7DayResponse:
     result = await context.service.get_key_usage_7d(key_id)
     if result is None:

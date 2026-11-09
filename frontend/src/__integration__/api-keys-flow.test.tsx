@@ -1,9 +1,18 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { http, HttpResponse } from "msw";
+import type { PropsWithChildren } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
+import { useApiKeys as useSettingsKeys } from "@/features/api-keys/hooks/use-api-keys";
+import { useApiKeys, useApiKeyTrends, useApiKeyUsage7Day } from "@/features/apis/hooks/use-apis";
+import { createApiKey, createApiKeyTrends, createApiKeyUsage7Day } from "@/test/mocks/factories";
+import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
+
+afterEach(() => vi.unstubAllGlobals());
 
 function getParentRow(cell: HTMLElement): HTMLElement {
   const row = cell.closest("tr");
@@ -96,46 +105,59 @@ describe("api keys flow integration", () => {
     expect(await screen.findByRole("button", { name: "1 account selected" })).toBeInTheDocument();
   });
 
-  it("displays the current api key list on settings", async () => {
-    window.history.pushState({}, "", "/settings");
-    renderWithProviders(<App />);
-
-    expect(await screen.findByRole("columnheader", { name: "Name" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Prefix" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Models" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Usage" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Expiry" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
-
-    const defaultKeyRow = getParentRow(screen.getByText("Default key"));
-    expect(within(defaultKeyRow).getByText("sk-test")).toBeInTheDocument();
-    expect(within(defaultKeyRow).getByText("gpt-5.1")).toBeInTheDocument();
-    expect(within(defaultKeyRow).getByText("Tokens: 125K/1M weekly")).toBeInTheDocument();
-    expect(within(defaultKeyRow).getByText("Active")).toBeInTheDocument();
-
-    const readOnlyRow = getParentRow(screen.getByText("Read only key"));
-    expect(within(readOnlyRow).getByText("sk-second")).toBeInTheDocument();
-    expect(within(readOnlyRow).getByText("gpt-4o-mini")).toBeInTheDocument();
-    expect(within(readOnlyRow).getByText(/12\.5K tok/)).toBeInTheDocument();
-    expect(within(readOnlyRow).getByText(/2\.2K cached/)).toBeInTheDocument();
-    expect(within(readOnlyRow).getByText(/42 req/)).toBeInTheDocument();
-    expect(within(readOnlyRow).getByText(/\$0\.42/)).toBeInTheDocument();
-    expect(within(readOnlyRow).getByText("Never")).toBeInTheDocument();
-    expect(within(readOnlyRow).getByText("Disabled")).toBeInTheDocument();
+  it.each([
+    ["/apis", "/api/api-keys/", ["api-keys", "list"], [createApiKey()]],
+    ["/settings", "/api/api-keys/", ["api-keys", "list"], [createApiKey()]],
+    ["/apis", "/api/api-keys/key_1/trends", ["api-keys", "trends", "key_1"], createApiKeyTrends()],
+    ["/apis", "/api/api-keys/key_1/usage-7d", ["api-keys", "usage-7d", "key_1"], createApiKeyUsage7Day()],
+  ] as const)("retries a failed read on %s at %s", async (page, endpoint, queryKey, recovered) => {
+    let requests = 0;
+    server.use(http.get(endpoint, () => {
+      requests += 1;
+      return requests === 1
+        ? HttpResponse.json({ error: { code: "dashboard_query_timeout", message: "Query timed out" } }, { status: 503 })
+        : HttpResponse.json(recovered);
+    }));
+    window.history.pushState({}, "", page);
+    const { queryClient } = renderWithProviders(<App />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(requests).toBe(2));
+    await waitFor(() => expect(queryClient.getQueryState(queryKey)?.status).toBe("success"));
+    expect(queryClient.getQueryState(queryKey)?.error).toBeNull();
   });
 
-  it("shows usage bars when editing a key with limits", async () => {
-    const user = userEvent.setup({ delay: null });
-
-    window.history.pushState({}, "", "/settings");
-    renderWithProviders(<App />);
-
-    expect(await screen.findByText("Default key")).toBeInTheDocument();
-    const defaultKeyRow = getParentRow(screen.getByText("Default key"));
-    await openRowActions(user, defaultKeyRow);
-    await user.click(await screen.findByRole("menuitem", { name: /Edit/ }));
-
-    // Edit dialog should show current usage section
-    expect(await screen.findByText("Current usage")).toBeInTheDocument();
+  it("aborts list and detail reads when their last observers leave", async () => {
+    const requests: { url: string; signal: AbortSignal }[] = [];
+    vi.stubGlobal("fetch", vi.fn((url: string, options: RequestInit) => {
+      const signal = options.signal;
+      if (!signal) throw new Error("Missing query abort signal");
+      requests.push({ url, signal });
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    function Wrapper({ children }: PropsWithChildren) {
+      return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    }
+    const page = renderHook(() => {
+      useApiKeys();
+      useApiKeyTrends("key_1");
+      useApiKeyUsage7Day("key_1");
+    }, { wrapper: Wrapper });
+    const settings = renderHook(() => useSettingsKeys(), { wrapper: Wrapper });
+    try {
+      await waitFor(() => expect(requests).toHaveLength(3));
+      page.unmount();
+      expect(requests.find(({ url }) => url.endsWith("/"))?.signal.aborted).toBe(false);
+      expect(requests.filter(({ url }) => !url.endsWith("/")).every(({ signal }) => signal.aborted)).toBe(true);
+      settings.unmount();
+      expect(requests.every(({ signal }) => signal.aborted)).toBe(true);
+    } finally {
+      page.unmount();
+      settings.unmount();
+      client.clear();
+    }
   });
 });

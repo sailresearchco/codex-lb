@@ -24,9 +24,10 @@ from app.db.dashboard_reads import (
     sqlite_usage_read_connection,
     sqlite_usage_read_lock,
 )
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ApiKey
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.reports.repository import ReportsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -295,3 +296,71 @@ async def test_account_mutation_keeps_its_existing_session_without_read_deadline
     assert response.status_code == 200
     async with SessionLocal() as session:
         assert await session.scalar(select(Account.security_work_authorized).where(Account.id == "deadline-writer"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "method"),
+    [
+        ("/api/api-keys", "list_usage_summary_by_key"),
+        ("/api/api-keys/", "list_usage_summary_by_key"),
+        ("/api/api-keys/{key_id}/trends", "trends_by_key"),
+        ("/api/api-keys/{key_id}/usage-7d", "usage_7d"),
+    ],
+)
+async def test_api_key_reads_interrupt_sqlite_and_allow_subsequent_reads(
+    async_client, db_setup, monkeypatch, path, method
+):
+    from app.db.session import engine
+
+    if engine.dialect.name != "sqlite":
+        pytest.skip("SQLite query budget; PostgreSQL uses its existing driver deadline")
+    assert engine.url.database not in (None, "", ":memory:")
+    created = await async_client.post("/api/api-keys", json={"name": "deadline-reader"})
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    path = path.format(key_id=key_id)
+    interrupted: list[int] = []
+
+    async def slow_read(self, *args, **kwargs):
+        try:
+            await self._session.execute(text(_EXPENSIVE_QUERY))
+        except OperationalError as exc:
+            assert isinstance(exc.orig, sqlite3.OperationalError)
+            interrupted.append(exc.orig.sqlite_errorcode)
+            raise
+        raise AssertionError("Unbounded query completed")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(dashboard_reads, "_READ_BUDGET_SECONDS", 0.05)
+        scoped.setattr(ApiKeysRepository, method, slow_read)
+        response = await async_client.get(path)
+
+    assert interrupted == [sqlite3.SQLITE_INTERRUPT]
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "dashboard_query_timeout"
+    healthy = await async_client.get(path)
+    assert healthy.status_code == 200
+    if method == "list_usage_summary_by_key":
+        assert [key["id"] for key in healthy.json()] == [key_id]
+    else:
+        assert healthy.json()["keyId"] == key_id
+
+
+@pytest.mark.asyncio
+async def test_api_key_mutations_keep_their_session_without_read_deadline(async_client, db_setup, monkeypatch):
+    monkeypatch.setattr(dashboard_reads, "_READ_BUDGET_SECONDS", -1)
+    created = await async_client.post("/api/api-keys", json={"name": "deadline-writer"})
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    updated = await async_client.patch(f"/api/api-keys/{key_id}", json={"name": "updated-writer"})
+    assert updated.status_code == 200
+    async with SessionLocal() as session:
+        assert await session.scalar(select(ApiKey.name).where(ApiKey.id == key_id)) == "updated-writer"
+    regenerated = await async_client.post(f"/api/api-keys/{key_id}/regenerate")
+    assert regenerated.status_code == 200
+    assert regenerated.json()["key"] != created.json()["key"]
+    deleted = await async_client.delete(f"/api/api-keys/{key_id}")
+    assert deleted.status_code == 204
+    async with SessionLocal() as session:
+        assert await session.get(ApiKey, key_id) is None

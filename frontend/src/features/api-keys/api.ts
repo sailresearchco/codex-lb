@@ -12,8 +12,8 @@ import {
 export const API_KEYS_BASE_PATH = "/api/api-keys";
 const MODELS_PATH = "/api/models";
 
-export function listApiKeys() {
-  return get(`${API_KEYS_BASE_PATH}/`, ApiKeyListSchema);
+export function listApiKeys(signal?: AbortSignal) {
+  return get(`${API_KEYS_BASE_PATH}/`, ApiKeyListSchema, { signal });
 }
 
 export function createApiKey(payload: unknown) {
