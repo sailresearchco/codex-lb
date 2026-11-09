@@ -381,6 +381,12 @@ def get_api_keys_context(
     return ApiKeysContext(session=session, repository=repository, service=service)
 
 
+def get_api_keys_read_context(
+    session: AsyncSession = Depends(get_dashboard_read_session),
+) -> ApiKeysContext:
+    return get_api_keys_context(session)
+
+
 def get_model_sources_context(
     session: AsyncSession = Depends(get_session),
 ) -> ModelSourcesContext:

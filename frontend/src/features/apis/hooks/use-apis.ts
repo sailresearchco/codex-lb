@@ -26,7 +26,7 @@ export function useApiKeys({ enabled = true }: ApiKeyQueryOptions = {}) {
 
   const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["api-keys", "list"],
-    queryFn: listApiKeys,
+    queryFn: ({ signal }) => listApiKeys(signal),
     select: (data) => data,
     enabled,
     refetchInterval: 30_000,
@@ -95,7 +95,7 @@ export function useApiKeys({ enabled = true }: ApiKeyQueryOptions = {}) {
 export function useApiKeyTrends(keyId: string | null, { enabled = true }: ApiKeyQueryOptions = {}) {
   return useQuery({
     queryKey: ["api-keys", "trends", keyId],
-    queryFn: () => getApiKeyTrends(keyId!),
+    queryFn: ({ signal }) => getApiKeyTrends(keyId!, signal),
     enabled: enabled && !!keyId,
     staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
@@ -106,7 +106,7 @@ export function useApiKeyTrends(keyId: string | null, { enabled = true }: ApiKey
 export function useApiKeyUsage7Day(keyId: string | null, { enabled = true }: ApiKeyQueryOptions = {}) {
   return useQuery({
     queryKey: ["api-keys", "usage-7d", keyId],
-    queryFn: () => getApiKeyUsage7Day(keyId!),
+    queryFn: ({ signal }) => getApiKeyUsage7Day(keyId!, signal),
     enabled: enabled && !!keyId,
     staleTime: 2 * 60_000,
     refetchInterval: 2 * 60_000,

@@ -54,6 +54,7 @@ export function ApiKeysSection({
   const createdDialog = useDialogState<string>();
 
   const keys = apiKeysQuery.data ?? [];
+  const listError = getErrorMessageOrNull(apiKeysQuery.error);
   const busy =
     disabled ||
     apiKeysQuery.isFetching ||
@@ -113,18 +114,32 @@ export function ApiKeysSection({
       />
 
       {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}
+      {listError ? (
+        <div className="space-y-3">
+          <AlertMessage variant="error">{listError}</AlertMessage>
+          <Button
+            variant="outline"
+            disabled={apiKeysQuery.isFetching}
+            onClick={() => void apiKeysQuery.refetch()}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
+      ) : null}
 
-      <ApiKeyTable
-        keys={keys}
-        busy={busy}
-        onEdit={(apiKey) => editDialog.show(apiKey)}
-        onDelete={(apiKey) => deleteDialog.show(apiKey)}
-        onRegenerate={(apiKey) => {
-          void regenerateMutation.mutateAsync(apiKey.id).then((result) => {
-            createdDialog.show(result.key);
-          });
-        }}
-      />
+      {apiKeysQuery.data ? (
+        <ApiKeyTable
+          keys={keys}
+          busy={busy}
+          onEdit={(apiKey) => editDialog.show(apiKey)}
+          onDelete={(apiKey) => deleteDialog.show(apiKey)}
+          onRegenerate={(apiKey) => {
+            void regenerateMutation.mutateAsync(apiKey.id).then((result) => {
+              createdDialog.show(result.key);
+            });
+          }}
+        />
+      ) : null}
 
       <ApiKeyCreateDialog
         open={createDialog.open}

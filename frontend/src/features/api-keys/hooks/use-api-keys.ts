@@ -20,7 +20,7 @@ export function useApiKeys() {
 
   const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["api-keys", "list"],
-    queryFn: listApiKeys,
+    queryFn: ({ signal }) => listApiKeys(signal),
   });
   const apiKeysQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 

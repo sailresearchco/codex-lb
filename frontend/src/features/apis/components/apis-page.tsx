@@ -145,7 +145,18 @@ export function ApisPage() {
 			</div>
 
 			{pageError ? (
-				<AlertMessage variant="error">{pageError}</AlertMessage>
+				<div className="space-y-3">
+					<AlertMessage variant="error">{pageError}</AlertMessage>
+					{listError ? (
+						<Button
+							variant="outline"
+							disabled={apiKeysQuery.isFetching}
+							onClick={() => void apiKeysQuery.refetch()}
+						>
+							{t("common.actions.retry")}
+						</Button>
+					) : null}
+				</div>
 			) : null}
 
 			{apiKeysQuery.isPending && !apiKeysQuery.data ? (
@@ -185,9 +196,14 @@ export function ApisPage() {
 						<ApiDetail
 							apiKey={selectedApiKey}
 							trends={trendsQuery.data}
+							trendsError={getErrorMessageOrNull(trendsQuery.error)}
+							trendsFetching={trendsQuery.isFetching}
+							onRetryTrends={() => void trendsQuery.refetch()}
 							usage7Day={usage7DayQuery.data}
 							usage7DayLoading={usage7DayQuery.isPending}
 							usage7DayError={usage7DayError}
+							usage7DayFetching={usage7DayQuery.isFetching}
+							onRetryUsage={() => void usage7DayQuery.refetch()}
 							busy={mutationBusy}
 							readOnly={!canWrite}
 							onEdit={(apiKey) => editDialog.show(apiKey)}

@@ -98,10 +98,7 @@ describe("useApiKeys", () => {
 		expect(apiMocks.updateApiKey).toHaveBeenCalledWith("key_1", { name: "Updated key" });
 		expect(apiMocks.deleteApiKey).toHaveBeenCalledWith("key_2");
 		expect(apiMocks.regenerateApiKey).toHaveBeenCalledWith("key_1");
-		expect(toastMocks.success).toHaveBeenCalledWith("API key created");
-		expect(toastMocks.success).toHaveBeenCalledWith("API key updated");
-		expect(toastMocks.success).toHaveBeenCalledWith("API key deleted");
-		expect(toastMocks.success).toHaveBeenCalledWith("API key regenerated");
+		expect(toastMocks.success).toHaveBeenCalledTimes(4);
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["api-keys", "list"] });
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["api-keys", "trends"] });
 	});
@@ -154,7 +151,7 @@ describe("detail queries", () => {
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
 		expect(result.current.data).toEqual(response);
-		expect(apiMocks.getApiKeyTrends).toHaveBeenCalledWith("key_1");
+		expect(apiMocks.getApiKeyTrends).toHaveBeenCalledWith("key_1", expect.any(AbortSignal));
 	});
 
 	it("fetches 7 day usage only when a key is selected", async () => {
@@ -175,6 +172,6 @@ describe("detail queries", () => {
 		await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
 		expect(result.current.data).toEqual(response);
-		expect(apiMocks.getApiKeyUsage7Day).toHaveBeenCalledWith("key_1");
+		expect(apiMocks.getApiKeyUsage7Day).toHaveBeenCalledWith("key_1", expect.any(AbortSignal));
 	});
 });

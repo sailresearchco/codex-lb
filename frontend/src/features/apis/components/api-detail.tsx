@@ -43,6 +43,11 @@ export type ApiDetailProps = {
 	usage7Day?: ApiKeyUsage7DayResponse | null;
 	usage7DayLoading?: boolean;
 	usage7DayError?: string | null;
+	trendsError?: string | null;
+	trendsFetching?: boolean;
+	usage7DayFetching?: boolean;
+	onRetryTrends?: () => void;
+	onRetryUsage?: () => void;
 	busy: boolean;
 	/** Read-only sessions see the key without edit, regenerate, enable/disable or delete. */
 	readOnly?: boolean;
@@ -68,6 +73,11 @@ export function ApiDetail({
 	usage7Day,
 	usage7DayLoading = false,
 	usage7DayError = null,
+	trendsError = null,
+	trendsFetching = false,
+	usage7DayFetching = false,
+	onRetryTrends,
+	onRetryUsage,
 	busy,
 	readOnly = false,
 	onEdit,
@@ -218,8 +228,29 @@ export function ApiDetail({
 				</div>
 			) : null}
 
+			{trendsError ? (
+				<div className="space-y-3">
+					<AlertMessage variant="error">{trendsError}</AlertMessage>
+					<Button
+						variant="outline"
+						disabled={trendsFetching}
+						onClick={onRetryTrends}
+					>
+						{t("common.actions.retry")}
+					</Button>
+				</div>
+			) : null}
 			{usage7DayError ? (
-				<AlertMessage variant="error">{usage7DayError}</AlertMessage>
+				<div className="space-y-3">
+					<AlertMessage variant="error">{usage7DayError}</AlertMessage>
+					<Button
+						variant="outline"
+						disabled={usage7DayFetching}
+						onClick={onRetryUsage}
+					>
+						{t("common.actions.retry")}
+					</Button>
+				</div>
 			) : null}
 
 			<ApiKeyInfo
