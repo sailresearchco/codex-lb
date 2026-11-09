@@ -1,0 +1,7 @@
+[Unit]
+Description=Codex LB workloads
+
+[Slice]
+CPUAccounting=yes
+MemoryAccounting=yes
+TasksAccounting=yes

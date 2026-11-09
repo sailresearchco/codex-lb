@@ -1,0 +1,25 @@
+[Unit]
+Description=Codex load balancer
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+Slice=codexlb.slice
+WorkingDirectory=/workspace/CodexLB
+ExecStart=/usr/bin/python3 /workspace/CodexLB/start.py
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+Restart=always
+RestartSec=5
+KillMode=control-group
+KillSignal=SIGINT
+TimeoutStopSec=45
+OOMPolicy=kill
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=codexlb
+
+[Install]
+WantedBy=multi-user.target
