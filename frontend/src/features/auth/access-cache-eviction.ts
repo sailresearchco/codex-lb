@@ -1,6 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 
-import { hasPermission, useAuthStore } from "@/features/auth/hooks/use-auth";
+import { grantedScope, hasPermission, useAuthStore } from "@/features/auth/hooks/use-auth";
 import { queryClient as defaultQueryClient } from "@/lib/query-client";
 
 /**
@@ -44,6 +44,11 @@ export function installAccessCacheEviction(client: QueryClient = defaultQueryCli
     const lostUsersManage =
       hasPermission(previous.permissions, "users:manage") && !hasPermission(state.permissions, "users:manage");
     const accountChanged = (previous.user?.id ?? null) !== (state.user?.id ?? null);
+    const apiKeyScopeChanged =
+      grantedScope(previous.permissions, "api_keys:read") !== grantedScope(state.permissions, "api_keys:read");
+    if (apiKeyScopeChanged || accountChanged) {
+      client.removeQueries({ queryKey: ["reports-options"] });
+    }
     if (lostUsersManage || accountChanged) {
       evictUsersManageQueries(client);
     }

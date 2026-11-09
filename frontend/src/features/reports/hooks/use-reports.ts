@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { grantedScope, useAuthStore } from "@/features/auth/hooks/use-auth";
 import { getReports, getReportsOptions, getThreadIdentity } from "../api";
 import { isReportDateRangeValid } from "../date";
 
@@ -39,6 +40,8 @@ export function useReports(
 }
 
 export function useReportsOptions(filters: ReportsFilterState, timeZone: string | undefined) {
+  const userId = useAuthStore((state) => state.user?.id ?? null);
+  const apiKeyScope = useAuthStore((state) => grantedScope(state.permissions, "api_keys:read"));
   const scope = {
     startDate: filters.startDate,
     endDate: filters.endDate,
@@ -47,9 +50,10 @@ export function useReportsOptions(filters: ReportsFilterState, timeZone: string 
     timezone: timeZone,
   };
   return useQuery({
-    queryKey: ["reports-options", scope],
+    queryKey: ["reports-options", scope, { userId, apiKeyScope }],
     enabled: isReportDateRangeValid(filters.startDate, filters.endDate),
     queryFn: ({ signal }) => getReportsOptions(scope, signal),
+    select: (options) => apiKeyScope ? options : { ...options, apiKeys: [] },
     staleTime: 5 * 60_000,
     refetchInterval: false,
     refetchOnWindowFocus: false,

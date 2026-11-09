@@ -5,10 +5,11 @@ from datetime import date, datetime, timedelta, timezone
 from itertools import batched
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, case, func, literal, or_, select, union_all
+from sqlalchemy import BigInteger, ColumnElement, and_, case, cast, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Account, RequestLog
+from app.db.models import Account, AccountUsageRollupState, ApiKey, RequestLog, RequestReportHourlyRollup
+from app.modules.accounts.usage_time_rollup import epoch_seconds, to_dimension
 from app.modules.reports.filters import (
     MISSING_USERAGENT_GROUP,
     _normal_traffic_clause,
@@ -282,15 +283,69 @@ class ReportsRepository:
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
     ) -> datetime | None:
-        source = report_source(
-            self._session,
-            [("earliest", datetime(1970, 1, 1), datetime(9998, 1, 1))],
-            account_ids,
-            model,
-            useragent_group,
-            api_key_ids,
+        start, end = datetime(1970, 1, 1), datetime(9998, 1, 1)
+        watermark = func.coalesce(
+            select(AccountUsageRollupState.reports_folded_through)
+            .where(AccountUsageRollupState.id == 1)
+            .scalar_subquery(),
+            start,
         )
+        watermark_epoch = (
+            cast(func.extract("epoch", watermark), BigInteger)
+            if self._session.get_bind().dialect.name == "postgresql"
+            else cast(func.strftime("%s", watermark), BigInteger)
+        )
+        r = RequestReportHourlyRollup
+        conditions = [
+            r.bucket_epoch >= epoch_seconds(start),
+            r.bucket_epoch < epoch_seconds(end),
+            r.bucket_epoch < watermark_epoch,
+        ]
+        if account_ids:
+            conditions.append(r.account_id.in_([to_dimension(value) for value in account_ids]))
+        if api_key_ids:
+            conditions.append(r.api_key_id.in_([to_dimension(value) for value in api_key_ids]))
+        if model:
+            conditions.append(r.model == model)
+        if useragent_group:
+            value = None if useragent_group == MISSING_USERAGENT_GROUP else useragent_group
+            conditions.append(r.useragent_group == to_dimension(value))
+        # The bucket is the index prefix; first_requested_at is not indexed.
+        # Find the earliest matching hour before taking its exact minimum.
+        first_bucket = (
+            select(r.bucket_epoch)
+            .where(*conditions)
+            .order_by(r.bucket_epoch)
+            .limit(1)
+            .correlate(None)
+            .scalar_subquery()
+        )
+        folded = select(func.min(r.first_requested_at).label("first_requested_at")).where(
+            *conditions, r.bucket_epoch == first_bucket
+        )
+        # One lower bound makes the watermark the index seek, rather than
+        # allowing SQLite's MIN optimization to seek epoch and filter history.
+        raw_start = case((watermark > start, watermark), else_=start)
+        raw = select(func.min(RequestLog.requested_at).label("first_requested_at")).where(
+            *_report_conditions(raw_start, end, account_ids, model, useragent_group, api_key_ids),
+        )
+        source = union_all(folded, raw).subquery("first_report_activity")
         return (await self._session.execute(select(func.min(source.c.first_requested_at)))).scalar_one_or_none()
+
+    async def list_api_key_options(self, start_at: datetime, end_at: datetime) -> list[tuple[str, str, str | None]]:
+        history = report_source(self._session, [("keys", start_at, end_at)], catalog=True)
+        keys = (
+            select(ApiKey.id.label("api_key_id"))
+            .union(select(history.c.api_key_id).where(history.c.api_key_id.is_not(None), history.c.api_key_id != ""))
+            .subquery("report_api_keys")
+        )
+        name = func.coalesce(func.nullif(ApiKey.name, ""), keys.c.api_key_id)
+        rows = await self._session.execute(
+            select(keys.c.api_key_id, name.label("name"), ApiKey.key_prefix)
+            .outerjoin(ApiKey, ApiKey.id == keys.c.api_key_id)
+            .order_by(func.lower(name), func.lower(func.coalesce(ApiKey.key_prefix, "")), keys.c.api_key_id)
+        )
+        return [(row.api_key_id, row.name, row.key_prefix) for row in rows]
 
     async def list_filter_options(
         self,
@@ -321,7 +376,7 @@ def _aggregate_columns(source) -> list:
 
 
 def _report_conditions(
-    start_date: datetime,
+    start_date: datetime | ColumnElement[datetime],
     end_date: datetime,
     account_ids: list[str] | None,
     model: str | None,

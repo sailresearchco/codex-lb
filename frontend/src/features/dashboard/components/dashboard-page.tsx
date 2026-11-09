@@ -126,7 +126,7 @@ export function DashboardPage() {
   const { conversationsQuery } = conversationsState;
   // Read-only sessions never see the API-key filter control, so they must not
   // query with one either (URL-carried `apiKeyId` is dropped).
-  const { filters, emptyStateFiltersApplied, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
+  const { filters, rangeValid, emptyStateFiltersApplied, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
     enabled: dashboardView === "request-logs",
     allowApiKeyFilters: canReadApiKeys,
   });
@@ -288,7 +288,7 @@ export function DashboardPage() {
     const count = conv.requestCount;
     const suffixParts: string[] = [];
 
-    if (filters.timeframe !== "all") {
+    if (filters.timeframe !== "custom") {
       suffixParts.push(filters.timeframe);
     }
     if (filters.statuses.length > 0) {
@@ -594,7 +594,37 @@ export function DashboardPage() {
               <ConversationsView state={conversationsState} accounts={overview?.accounts ?? []} />
             ) : (
               <>
-                {logsQuery.error ? (
+                <RequestFilters
+                      filters={filters}
+                      accountOptions={accountOptions}
+                      apiKeyOptions={apiKeyOptions}
+                      modelOptions={modelOptions}
+                      statusOptions={statusOptions}
+                      showApiKeyFilter={canReadApiKeys}
+                      onSearchChange={(search) => updateFilters({ search, offset: 0 })}
+                      onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
+                      onRangeChange={(range) => updateFilters({ ...range, offset: 0 })}
+                      onAccountChange={(accountIds) => updateFilters({ accountIds, offset: 0 })}
+                      onApiKeyChange={(apiKeyIds) => updateFilters({ apiKeyIds, offset: 0 })}
+                      onModelChange={(modelOptionsSelected) =>
+                        updateFilters({ modelOptions: modelOptionsSelected, offset: 0 })
+                      }
+                      onStatusChange={(statuses) => updateFilters({ statuses, offset: 0 })}
+                      onConversationDismiss={handleConversationDismiss}
+                      onReset={() =>
+                        updateFilters({
+                          search: "",
+                          timeframe: "24h",
+                          accountIds: [],
+                          apiKeyIds: [],
+                          modelOptions: [],
+                          statuses: [],
+                          conversationId: null,
+                          offset: 0,
+                        })
+                      }
+                    />
+                {rangeValid && logsQuery.error ? (
                   <div className="space-y-3 rounded-xl border bg-card p-4">
                     <div role="alert">
                       <AlertMessage variant="error">{logsQuery.error.message}</AlertMessage>
@@ -612,41 +642,13 @@ export function DashboardPage() {
                     </Button>
                   </div>
                 ) : null}
-                {logsQuery.isPending && !logPage ? (
+                {rangeValid && logsQuery.isPending && !logPage ? (
                   <div className="rounded-xl border bg-card py-8">
                     <SpinnerBlock />
                   </div>
-                ) : logPage ? (
+                ) : rangeValid && logPage ? (
                   <>
-                    <RequestFilters
-                      filters={filters}
-                      accountOptions={accountOptions}
-                      apiKeyOptions={apiKeyOptions}
-                      modelOptions={modelOptions}
-                      statusOptions={statusOptions}
-                      showApiKeyFilter={canReadApiKeys}
-                      onSearchChange={(search) => updateFilters({ search, offset: 0 })}
-                      onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
-                      onAccountChange={(accountIds) => updateFilters({ accountIds, offset: 0 })}
-                      onApiKeyChange={(apiKeyIds) => updateFilters({ apiKeyIds, offset: 0 })}
-                      onModelChange={(modelOptionsSelected) =>
-                        updateFilters({ modelOptions: modelOptionsSelected, offset: 0 })
-                      }
-                      onStatusChange={(statuses) => updateFilters({ statuses, offset: 0 })}
-                      onConversationDismiss={handleConversationDismiss}
-                      onReset={() =>
-                        updateFilters({
-                          search: "",
-                          timeframe: "all",
-                          accountIds: [],
-                          apiKeyIds: [],
-                          modelOptions: [],
-                          statuses: [],
-                          conversationId: null,
-                          offset: 0,
-                        })
-                      }
-                    />
+
                     {conversationSummary ? (
                       <div className="rounded-xl border bg-card p-4">
                         <p className="text-sm text-muted-foreground">{conversationSummary}</p>

@@ -335,6 +335,7 @@ async def test_request_log_timeframe_uses_server_clock_for_rows_and_options(
 
     fixed_now = datetime(2026, 8, 31, 12, 0, 0)
     monkeypatch.setattr(timeframes_module, "utcnow", lambda: fixed_now)
+    monkeypatch.setattr("app.modules.request_logs.api.utcnow", lambda: fixed_now)
     async with SessionLocal() as session:
         repo = RequestLogsRepository(session)
         await repo.add_log(

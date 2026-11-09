@@ -14,6 +14,7 @@ from app.modules.reports.schemas import (
     AccountCostEntry,
     DailyReportRow,
     ModelCostEntry,
+    ReportApiKeyOption,
     ReportComparison,
     ReportComparisonPrevious,
     ReportsOptionsResponse,
@@ -213,6 +214,19 @@ class ReportsService:
             keyed=keyed,
             unkeyed=unkeyed,
         )
+
+    async def get_api_key_options(
+        self,
+        start_date: date,
+        end_date: date,
+        report_timezone: str,
+    ) -> list[ReportApiKeyOption]:
+        start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
+        rows = await self._repository.list_api_key_options(
+            _local_midnight_to_utc_naive(start_date, timezone_info),
+            _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info),
+        )
+        return [ReportApiKeyOption(id=key_id, name=name, key_prefix=prefix) for key_id, name, prefix in rows]
 
     async def get_options(
         self,

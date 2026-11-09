@@ -17,11 +17,19 @@ The system SHALL preserve request counts, error and cancellation counts, token t
 - **AND** account soft delete, hard delete and consolidation SHALL mirror report aggregates under the shared fold lock
 
 ### Requirement: Lightweight filter options
-`GET /api/reports/options` SHALL apply the report date, timezone, account and API-key scope and return distinct models and nonblank User-Agent groups without running speed or full-report aggregates. It SHALL use dashboard authentication and the same date-range validation as reports.
+`GET /api/reports/options` SHALL apply the report date, timezone, account and API-key scope and return distinct models and nonblank User-Agent groups without running speed or full-report aggregates. It SHALL use dashboard authentication and the same date-range validation as reports. The response SHALL also include API-key choices for principals with `api_keys:read`, combining current key metadata and key IDs present in the selected report period's folded history and bounded raw complement. Deleted IDs SHALL retain ID fallback labels. The key catalog SHALL NOT self-filter on selected API keys or run full-history raw-log discovery, speed calculations, measure aggregation, or conversation grouping. Other principals SHALL receive an empty API-key list, including after an authorized response populated shared caches. The browser SHALL obtain key choices from this endpoint rather than request-log options. Browser catalog caches SHALL be separated by principal and API-key read scope, evicted when either changes, and redact key metadata immediately when that permission is absent.
 
 #### Scenario: Filter catalog loads
 - **WHEN** the report page loads or its scope changes
 - **THEN** it SHALL request options from the dedicated endpoint instead of a second full report
+
+### Requirement: Indexed first activity lookup
+Reports SHALL determine first activity from the minimum timestamp in the earliest matching folded hour and an indexed raw-tail minimum, in one snapshot. This lookup SHALL preserve report scope and internal-traffic exclusions without calculating unrelated measures or grouping all historical request rows.
+
+#### Scenario: First activity spans retained and live history
+- **GIVEN** filtered history exists before and after the report fold watermark
+- **WHEN** a report requests its first activity timestamp
+- **THEN** the earliest matching timestamp SHALL remain exact before and after covered raw history is pruned
 
 ### Requirement: Bounded speed work
 Exact speed medians SHALL only run for date windows of at most seven days. Longer windows SHALL retain zero-valued numeric speed fields for compatibility, return `speedMetricsAvailable=false` and the maximum supported speed-window size and SHALL NOT execute median SQL. The dashboard SHALL explain the omission and hide unavailable speed charts.

@@ -290,7 +290,10 @@ class RequestLogsRepository:
                     RequestLog.useragent_group.ilike(pattern, escape="\\"),
                 )
             )
-        if since is not None or search_value is not None:
+        # The page itself applies the activity window. Only search needs a
+        # separate qualifying-ID set, since a matching older row can qualify
+        # a conversation whose latest row does not match the search text.
+        if search_value is not None:
             candidate_ids = (
                 select(conversation_id.label("conversation_id")).where(*candidate_conditions).distinct().subquery()
             )
@@ -1270,6 +1273,7 @@ class RequestLogsRepository:
         *,
         cache_mode: str = "since",
         timeframe: str | None = None,
+        until_is_now: bool = False,
         include_sensitive_metadata: bool = True,
         include_account_identity: bool = True,
         include_api_key_identity: bool = True,
@@ -1334,7 +1338,7 @@ class RequestLogsRepository:
         cache_key = (
             search,
             window_identity,
-            until,
+            None if until_is_now else until,
             conversation_id,
             tuple(account_ids or ()),
             tuple(api_key_ids or ()),

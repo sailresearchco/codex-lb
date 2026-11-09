@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { RotateCcw, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -7,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { MultiSelectFilter, type MultiSelectOption } from "@/features/dashboard/components/filters/multi-select-filter";
 import { TimeframeSelect } from "@/features/dashboard/components/filters/timeframe-select";
 import type { FilterState } from "@/features/dashboard/schemas";
+import { isRequestLogRangeValid, requestLogDateTimeInput } from "@/features/dashboard/request-log-window";
 
 export type RequestFiltersProps = {
   filters: FilterState;
@@ -18,6 +20,7 @@ export type RequestFiltersProps = {
   showApiKeyFilter?: boolean;
   onSearchChange: (value: string) => void;
   onTimeframeChange: (value: FilterState["timeframe"]) => void;
+  onRangeChange: (range: Pick<FilterState, "since" | "until">) => void;
   onAccountChange: (values: string[]) => void;
   onApiKeyChange: (values: string[]) => void;
   onModelChange: (values: string[]) => void;
@@ -35,6 +38,7 @@ export function RequestFilters({
   showApiKeyFilter = true,
   onSearchChange,
   onTimeframeChange,
+  onRangeChange,
   onAccountChange,
   onApiKeyChange,
   onModelChange,
@@ -43,6 +47,8 @@ export function RequestFilters({
   onReset,
 }: RequestFiltersProps) {
   const { t } = useTranslation();
+  const rangeErrorId = useId();
+  const rangeInvalid = filters.timeframe === "custom" && !isRequestLogRangeValid(filters.since, filters.until);
 
   return (
     <div className="space-y-2 rounded-xl border bg-card p-4">
@@ -59,6 +65,36 @@ export function RequestFilters({
 
         <TimeframeSelect value={filters.timeframe} onChange={onTimeframeChange} />
       </div>
+
+      {filters.timeframe === "custom" ? (
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-xs">
+              {t("dashboard.filters.startTimeUtc")}
+              <Input
+                type="datetime-local"
+                step="any"
+                value={requestLogDateTimeInput(filters.since)}
+                aria-invalid={rangeInvalid || undefined}
+                aria-describedby={rangeInvalid ? rangeErrorId : undefined}
+                onChange={(event) => onRangeChange({ since: event.target.value ? `${event.target.value}Z` : "", until: filters.until })}
+              />
+            </label>
+            <label className="text-xs">
+              {t("dashboard.filters.endTimeUtc")}
+              <Input
+                type="datetime-local"
+                step="any"
+                value={requestLogDateTimeInput(filters.until)}
+                aria-invalid={rangeInvalid || undefined}
+                aria-describedby={rangeInvalid ? rangeErrorId : undefined}
+                onChange={(event) => onRangeChange({ since: filters.since, until: event.target.value ? `${event.target.value}Z` : "" })}
+              />
+            </label>
+          </div>
+          {rangeInvalid ? <p id={rangeErrorId} role="alert" className="text-xs text-destructive">{t("dashboard.filters.invalidDateRange")}</p> : null}
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-2">
         <MultiSelectFilter

@@ -12,6 +12,7 @@ from app.db.models import Account, AccountStatus, ApiKey
 from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.request_logs.service import RequestLogsService
 
 pytestmark = pytest.mark.integration
 
@@ -502,11 +503,8 @@ async def test_request_logs_options_unfiltered_returns_api_key_facet(async_clien
 
 
 @pytest.mark.asyncio
-async def test_request_logs_options_unfiltered_issues_no_distinct_statements(async_client, db_setup):
-    """The spec requires bounded probes for unfiltered facets: no facet may
-    run a DISTINCT pass over request_logs."""
-    import re
-
+async def test_request_logs_options_default_queries_have_finite_time_bounds(async_client, db_setup):
+    """Every default facet query must restrict raw work to its resolved window."""
     from sqlalchemy import event
 
     now = utcnow()
@@ -542,8 +540,8 @@ async def test_request_logs_options_unfiltered_issues_no_distinct_statements(asy
     assert len(response.json()["modelOptions"]) == 3
     options_statements = [stmt for stmt in statements if "request_logs" in stmt]
     assert options_statements, "expected captured facet statements"
-    assert not any(re.search(r"SELECT\s+DISTINCT\b", stmt, re.IGNORECASE) for stmt in options_statements)
-    assert any("facet_skip" in stmt for stmt in options_statements)
+    assert all("request_logs.requested_at >=" in stmt for stmt in options_statements)
+    assert all("request_logs.requested_at <=" in stmt for stmt in options_statements)
 
 
 # PostgreSQL plan pin for the live-row partial facet indexes. Seed shape
@@ -646,13 +644,13 @@ def _plan_nodes(plan: dict) -> list[dict]:
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(engine.dialect.name != "postgresql", reason="PostgreSQL-only query plan test")
-async def test_request_logs_options_facet_probes_use_live_row_indexes_postgresql(async_client, db_setup):
-    """Every production ``facet_skip`` statement (leading skip scan, per-value
+async def test_request_logs_options_facet_probes_use_live_row_indexes_postgresql(db_setup):
+    """Every unscoped repository ``facet_skip`` statement (leading skip scan, per-value
     second-column skip scan and ``(value, NULL)`` probe) for the model, api-key
     and status facets is served by its live-row partial index: no rows removed
     by filter and a constant number of index entries per probe, independent of
-    the soft-deleted cohort. The statements are captured from the real options
-    call and re-run under EXPLAIN ANALYZE rather than hand-written."""
+    the soft-deleted cohort. The public API always supplies finite bounds;
+    this covers the repository's retained unscoped path directly."""
     from sqlalchemy import event
     from sqlalchemy.sql import Select
 
@@ -667,16 +665,15 @@ async def test_request_logs_options_facet_probes_use_live_row_indexes_postgresql
 
     event.listen(engine.sync_engine, "before_execute", _capture)
     try:
-        response = await async_client.get("/api/request-logs/options")
+        async with SessionLocal() as session:
+            options = await RequestLogsService(RequestLogsRepository(session)).list_filter_options()
     finally:
         event.remove(engine.sync_engine, "before_execute", _capture)
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["accountIds"] == ["acc_facets"]
-    assert sorted({option["model"] for option in payload["modelOptions"]}) == ["gpt-4o", "gpt-5.1", "o4-mini"]
-    assert [key["id"] for key in payload["apiKeys"]] == ["key_live_a", "key_live_b"]
-    assert payload["statuses"] == ["ok", "cancelled", "rate_limit", "error"]
+    assert options.account_ids == ["acc_facets"]
+    assert sorted({option.model for option in options.model_options}) == ["gpt-4o", "gpt-5.1", "o4-mini"]
+    assert [key.id for key in options.api_keys] == ["key_live_a", "key_live_b"]
+    assert options.statuses == ["ok", "cancelled", "rate_limit", "error"]
 
     facet_statements = [sql for sql in captured if "FROM request_logs" in sql]
     assert any("facet_skip" in sql for sql in facet_statements)

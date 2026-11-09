@@ -66,6 +66,60 @@ function createWrapper(
 }
 
 describe("useRequestLogs", () => {
+  it("defaults legacy all-history bookmarks to a bounded timeframe", async () => {
+    let location = "";
+    const { result } = renderHook(() => useRequestLogs(), {
+      wrapper: createWrapper(createTestQueryClient(), "/dashboard?timeframe=all&overviewTimeframe=30d", (search) => { location = search; }),
+    });
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    expect(result.current.listFilters.timeframe).toBe("24h");
+    expect(result.current.facetFilters.timeframe).toBe("24h");
+    expect(new URLSearchParams(location).get("timeframe")).toBeNull();
+    expect(new URLSearchParams(location).get("overviewTimeframe")).toBe("30d");
+  });
+
+  it("restores historical UTC ranges and blocks invalid ranges until repaired", async () => {
+    const requests: URL[] = [];
+    server.use(
+      http.get("/api/request-logs", ({ request }) => {
+        requests.push(new URL(request.url));
+        return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+      }),
+      http.get("/api/request-logs/options", ({ request }) => {
+        requests.push(new URL(request.url));
+        return HttpResponse.json({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
+      }),
+    );
+    let location = "";
+    const params = new URLSearchParams({ since: "2020-01-01T02:00:00+02:00", until: "2020-01-09T00:00:00Z" });
+    const { result } = renderHook(() => useRequestLogs(), {
+      wrapper: createWrapper(createTestQueryClient(), `/dashboard?${params}`, (search) => { location = search; }),
+    });
+    expect(result.current.rangeValid).toBe(false);
+    expect(requests).toHaveLength(0);
+    await act(async () => result.current.updateFilters({ until: "2020-01-08T00:00:00Z" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    for (const request of requests) {
+      expect(request.searchParams.get("since")).toBe("2020-01-01T00:00:00.000Z");
+      expect(request.searchParams.get("until")).toBe("2020-01-08T00:00:00.000Z");
+      expect(request.searchParams.has("timeframe")).toBe(false);
+    }
+    expect(new URLSearchParams(location).get("until")).toBe("2020-01-08T00:00:00Z");
+    await act(async () => result.current.updateFilters({ conversationId: "old-conversation", offset: 0 }));
+    await waitFor(() => expect(requests).toHaveLength(3));
+    expect(requests[2].searchParams.get("conversation_id")).toBe("old-conversation");
+    expect(requests[2].searchParams.get("since")).toBe("2020-01-01T00:00:00.000Z");
+    expect(requests[2].searchParams.get("until")).toBe("2020-01-08T00:00:00.000Z");
+    await act(async () => result.current.updateFilters({ until: "2019-12-31T00:00:00Z" }));
+    expect(result.current.rangeValid).toBe(false);
+    expect(requests).toHaveLength(3);
+    await act(async () => result.current.updateFilters({ timeframe: "24h", offset: 0 }));
+    await waitFor(() => expect(requests).toHaveLength(5));
+    expect(result.current.rangeValid).toBe(true);
+    expect(new URLSearchParams(location).has("since")).toBe(false);
+    expect(new URLSearchParams(location).has("until")).toBe(false);
+  });
+
   it("aborts obsolete searches and sends only settled text while other filters stay immediate", async () => {
     const requests: Array<{ url: URL; signal: AbortSignal }> = [];
     vi.stubGlobal("fetch", vi.fn((url: string, options: RequestInit) => {
@@ -642,7 +696,7 @@ describe("useRequestLogs", () => {
 describe("requestLogFiltersApplied", () => {
   const defaults = {
     search: "",
-    timeframe: "all" as const,
+    timeframe: "24h" as const,
     accountIds: [],
     apiKeyIds: [],
     modelOptions: [],
@@ -657,7 +711,7 @@ describe("requestLogFiltersApplied", () => {
   });
 
   it("is true when a narrowing filter is set", () => {
-    expect(requestLogFiltersApplied({ ...defaults, timeframe: "24h" })).toBe(true);
+    expect(requestLogFiltersApplied({ ...defaults, timeframe: "7d" })).toBe(true);
     expect(requestLogFiltersApplied({ ...defaults, search: "rate" })).toBe(true);
     expect(requestLogFiltersApplied({ ...defaults, conversationId: "conv-1" })).toBe(true);
     expect(requestLogFiltersApplied({ ...defaults, statuses: ["error"] })).toBe(true);

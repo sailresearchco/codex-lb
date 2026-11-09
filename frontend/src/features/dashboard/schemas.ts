@@ -277,12 +277,14 @@ export const RequestLogFilterOptionsSchema = z.object({
   statuses: z.array(z.string()),
 });
 
-const RequestLogTimeframeSchema = z.enum(["all", "1h", "24h", "7d"]);
+const RequestLogTimeframeSchema = z.enum(["1h", "24h", "7d", "custom"]);
 export type RequestLogTimeframe = z.infer<typeof RequestLogTimeframeSchema>;
 
 export const FilterStateSchema = z.object({
   search: z.string(),
   timeframe: RequestLogTimeframeSchema,
+  since: z.string().optional(),
+  until: z.string().optional(),
   accountIds: z.array(z.string()),
   apiKeyIds: z.array(z.string()),
   modelOptions: z.array(z.string()),

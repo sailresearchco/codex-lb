@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timedelta
+from typing import TypedDict, cast
 
 import pytest
-from sqlalchemy import delete, func, select, update
+from aiosqlite import Connection as AsyncSQLiteConnection
+from sqlalchemy import delete, func, insert, select, update
 
-from app.db.models import AccountUsageRollupState, RequestLog, RequestReportHourlyRollup
+from app.db.models import AccountUsageRollupState, ApiKey, RequestLog, RequestReportHourlyRollup
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup import lock_fold_state
@@ -92,6 +94,154 @@ async def test_report_statistics_survive_raw_pruning(db_setup):
         await session.execute(delete(RequestLog).where(RequestLog.requested_at < END))
         await session.commit()
     assert await _snapshot() == expected
+
+
+async def test_earliest_report_activity_preserves_filtered_minima_and_raw_boundary(db_setup):
+    async with SessionLocal() as session:
+        session.add_all([_make_account("report-a", "a@example.com"), _make_account("report-b", "b@example.com")])
+        await session.flush()
+        for minutes, account, key, model, agent, deleted, kind, source in (
+            (40, "report-a", "removed", "m2", "CLI", False, "normal", None),
+            (5, "report-b", "\x1fkey", "m1", None, True, "normal", None),
+            (20, "report-a", "", "m2", "", False, "normal", None),
+            (60, "report-a", "removed", "m1", "\x1fclient", False, "normal", None),
+            (130, "report-b", None, "m3", "CLI", False, "normal", None),
+            (1, "report-a", None, "m1", "CLI", False, "normal", "limit_warmup"),
+            (2, "report-a", None, "m1", "CLI", False, "warmup", None),
+        ):
+            session.add(
+                RequestLog(
+                    request_id=f"earliest-{minutes}",
+                    requested_at=BASE + timedelta(minutes=minutes),
+                    account_id=account,
+                    api_key_id=key,
+                    model=model,
+                    useragent_group=agent,
+                    deleted_at=BASE if deleted else None,
+                    request_kind=kind,
+                    source=source,
+                    status="success",
+                )
+            )
+        await session.commit()
+
+    class EarliestFilters(TypedDict, total=False):
+        account_ids: list[str]
+        api_key_ids: list[str]
+        model: str
+        useragent_group: str
+
+    scopes: list[tuple[EarliestFilters, int | None]] = [
+        ({}, 5),
+        ({"account_ids": ["report-a"]}, 20),
+        ({"api_key_ids": ["\x1fkey"]}, 5),
+        ({"api_key_ids": [""]}, 20),
+        ({"api_key_ids": ["removed"], "model": "m1"}, 60),
+        ({"useragent_group": "Missing User-Agent"}, 5),
+        ({"useragent_group": "\x1fclient"}, 60),
+        ({"model": "m3"}, 130),
+        ({"account_ids": ["missing"]}, None),
+    ]
+
+    async def check_minima():
+        async with SessionLocal() as session:
+            repo = ReportsRepository(session)
+            for filters, minutes in scopes:
+                expected = None if minutes is None else BASE + timedelta(minutes=minutes)
+                assert await repo.earliest_report_activity_at(**filters) == expected
+
+    await check_minima()
+    await _fold(BASE + timedelta(hours=1))
+    await check_minima()
+    async with SessionLocal() as session:
+        await session.execute(delete(RequestLog).where(RequestLog.requested_at < BASE + timedelta(hours=1)))
+        await session.commit()
+    await check_minima()
+    await _fold(BASE + timedelta(hours=3))
+    await check_minima()
+
+
+async def test_earliest_report_activity_has_bounded_sqlite_work(db_setup):
+    row_count = 10_000
+    async with SessionLocal() as session:
+        if session.get_bind().dialect.name != "sqlite":
+            pytest.skip("SQLite virtual-machine work regression")
+        await session.execute(
+            insert(RequestLog),
+            [
+                {
+                    "request_id": f"work-{index}",
+                    "requested_at": BASE + timedelta(minutes=index),
+                    "conversation_id": f"thread-{index}",
+                    "api_key_id": f"key-{index % 64}",
+                    "model": f"model-{index % 4}",
+                    "useragent_group": f"client-{index % 8}",
+                    "input_tokens": index,
+                    "status": "success",
+                }
+                for index in range(row_count)
+            ],
+        )
+        await session.commit()
+
+    async def bounded_lookup():
+        async with SessionLocal() as session:
+            connection = await session.connection()
+            driver = cast(AsyncSQLiteConnection, (await connection.get_raw_connection()).driver_connection)
+            operations = 0
+
+            def progress() -> int:
+                nonlocal operations
+                operations += 100
+                # A generous indexed-lookup budget. Grouping these 10,000
+                # historical threads for one MIN exceeds it by orders of magnitude.
+                return int(operations > 50_000)
+
+            await driver.set_progress_handler(progress, 100)
+            try:
+                assert await ReportsRepository(session).earliest_report_activity_at() == BASE
+            finally:
+                await driver.set_progress_handler(lambda: 0, 0)
+            completed_operations = operations
+            # Reuse the same connection for a full scan and verify the
+            # private measurement callback cannot leak to later work.
+            assert await session.scalar(select(func.sum(RequestLog.input_tokens))) == row_count * (row_count - 1) // 2
+            assert operations == completed_operations
+
+    await bounded_lookup()  # No state row: cold raw fallback.
+    await _fold(BASE + timedelta(days=7))
+    await bounded_lookup()  # Permanent history with high thread cardinality.
+
+
+async def test_report_key_catalog_retains_historical_keys_in_selected_period(db_setup):
+    async with SessionLocal() as session:
+        session.add(ApiKey(id="unused-current", name="Current", key_hash="current-hash", key_prefix="cur"))
+        for key, at in (
+            ("deleted-folded", BASE + timedelta(minutes=15)),
+            ("\x1fdeleted-tail", BASE + timedelta(hours=1)),
+            (None, BASE + timedelta(minutes=20)),
+            ("", BASE + timedelta(minutes=25)),
+            ("outside-before", BASE - timedelta(microseconds=1)),
+            ("outside-after", BASE + timedelta(hours=2)),
+        ):
+            session.add(
+                RequestLog(api_key_id=key, request_id=f"catalog-{key}", requested_at=at, model="m", status="success")
+            )
+        await session.commit()
+
+    async def catalog():
+        async with SessionLocal() as session:
+            rows = await ReportsRepository(session).list_api_key_options(BASE, BASE + timedelta(hours=2))
+            return {key: prefix for key, _name, prefix in rows}
+
+    expected = {"unused-current": "cur", "deleted-folded": None, "\x1fdeleted-tail": None}
+    assert await catalog() == expected
+    await _fold(BASE + timedelta(hours=1))
+    assert await catalog() == expected
+    async with SessionLocal() as session:
+        await session.execute(delete(RequestLog).where(RequestLog.requested_at < BASE + timedelta(hours=1)))
+        await session.commit()
+    assert await catalog() == expected
 
 
 @pytest.mark.parametrize("action", ["soft", "hard", "merge"])
