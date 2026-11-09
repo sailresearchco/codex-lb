@@ -47,3 +47,16 @@ Successful reports and options SHALL be cached for at most 60 seconds per normal
 #### Scenario: Failed computation
 - **WHEN** a computation fails or is cancelled
 - **THEN** the next request SHALL be able to compute a fresh result
+
+### Requirement: SQLite dashboard read execution budget
+Dashboard overview, projections, request-log listing and options, conversation listing and details, reports, account listing, account trends, and cached account reset-credit reads SHALL share a fifteen-second SQLite query budget within each request after acquiring their private file-backed connection. SQLite execution and row fetching SHALL stop when that budget expires, including synchronous usage-history reads. Lock waits SHALL use the remaining budget. Expiration SHALL return HTTP 503 with dashboard error code `dashboard_query_timeout`. Cleanup SHALL remove connection-local deadlines before ordinary reuse. This budget SHALL NOT change account mutations, upstream usage-reset-credit fetches and credential refresh, proxy writes, migration connections, PostgreSQL deadlines, or shared in-memory SQLite connections.
+
+#### Scenario: A query exceeds the read budget
+- **WHEN** a selected dashboard read exceeds its SQLite execution budget
+- **THEN** SQLite SHALL stop the query and the request SHALL return `dashboard_query_timeout`
+- **AND** subsequent reads and writes SHALL remain usable after cleanup
+
+#### Scenario: Synchronous usage history consumes the remaining budget
+- **GIVEN** a dashboard request has already spent part of its query budget
+- **WHEN** it reads usage history on a worker thread
+- **THEN** that read and its row fetching SHALL use the same remaining deadline

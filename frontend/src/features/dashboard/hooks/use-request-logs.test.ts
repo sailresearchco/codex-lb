@@ -66,6 +66,52 @@ function createWrapper(
 }
 
 describe("useRequestLogs", () => {
+  it("aborts obsolete searches and sends only settled text while other filters stay immediate", async () => {
+    const requests: Array<{ url: URL; signal: AbortSignal }> = [];
+    vi.stubGlobal("fetch", vi.fn((url: string, options: RequestInit) => {
+      const parsed = new URL(url, "http://localhost");
+      if (parsed.pathname.endsWith("/options")) {
+        return Promise.resolve(new Response(JSON.stringify({
+          accountIds: [], apiKeys: [], modelOptions: [], statuses: [],
+        }), { headers: { "Content-Type": "application/json" } }));
+      }
+      const signal = options.signal as AbortSignal;
+      requests.push({ url: parsed, signal });
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }));
+    const { result, unmount } = renderHook(() => useRequestLogs(), {
+      wrapper: createWrapper(createTestQueryClient(), "/dashboard?timeframe=24h"),
+    });
+    try {
+      await waitFor(() => expect(requests).toHaveLength(1));
+      vi.useFakeTimers();
+      await act(async () => result.current.updateFilters({ search: "q", offset: 0 }));
+      expect(requests[0].signal.aborted).toBe(true);
+      await act(async () => vi.advanceTimersByTimeAsync(299));
+      expect(requests).toHaveLength(1);
+      await act(async () => result.current.updateFilters({ search: "", offset: 0 }));
+      await act(async () => vi.advanceTimersByTimeAsync(299));
+      expect(requests).toHaveLength(1);
+      await act(async () => result.current.updateFilters({ search: "quota", offset: 0 }));
+      await act(async () => vi.advanceTimersByTimeAsync(299));
+      expect(requests).toHaveLength(1);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(requests).toHaveLength(2);
+      expect(requests[1].url.searchParams.get("search")).toBe("quota");
+
+      await act(async () => result.current.updateFilters({ offset: 25 }));
+      expect(requests).toHaveLength(3);
+      expect(requests[1].signal.aborted).toBe(true);
+      expect(requests[2].url.searchParams.get("offset")).toBe("25");
+    } finally {
+      unmount();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps symbolic timeframes stable across refetch despite browser clock skew", async () => {
     const listCalls: URLSearchParams[] = [];
     const optionCalls: URLSearchParams[] = [];

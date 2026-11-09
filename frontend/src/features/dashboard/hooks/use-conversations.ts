@@ -116,7 +116,7 @@ export function useConversations(options: UseConversationsOptions = {}) {
     refetch,
   } = useQuery({
     queryKey: ["dashboard", "conversations", conversationQueryKey],
-    queryFn: () => getConversations(listFilters),
+    queryFn: ({ signal }) => getConversations(listFilters, signal),
     enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

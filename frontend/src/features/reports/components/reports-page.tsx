@@ -136,7 +136,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     refetch: refetchAccounts,
   } = useQuery({
     queryKey: ["accounts", "reports-filter"],
-    queryFn: listAccounts,
+    queryFn: ({ signal }) => listAccounts(signal),
   });
   const {
     data: apiKeysOptionsData,
@@ -144,7 +144,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     refetch: refetchApiKeys,
   } = useQuery({
     queryKey: ["request-log-options", "reports-filter"],
-    queryFn: () => getRequestLogOptions(),
+    queryFn: ({ signal }) => getRequestLogOptions({}, signal),
   });
 
   const accountOptions = useMemo(

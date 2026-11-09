@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { isEmailLabel } from "@/components/blur-email";
+import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -24,6 +25,7 @@ import type {
 } from "@/features/settings/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
+import { getErrorMessageOrNull } from "@/utils/errors";
 
 export type AccountDetailProps = {
   account: AccountSummary | null;
@@ -80,7 +82,7 @@ export function AccountDetail({
   resetCreditsUnavailable = false,
 }: AccountDetailProps) {
   const { t } = useTranslation();
-  const { data: trends } = useAccountTrends(account?.accountId ?? null);
+  const trendsQuery = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
 
   if (!account) {
@@ -162,9 +164,25 @@ export function AccountDetail({
           onTestEndpoint={onProxyEndpointTest}
         />
       ) : null}
+      {trendsQuery.error ? (
+        <div className="space-y-3">
+          <div role="alert">
+            <AlertMessage variant="error">{getErrorMessageOrNull(trendsQuery.error)}</AlertMessage>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void trendsQuery.refetch()}
+            disabled={trendsQuery.isFetching}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
+      ) : null}
       <AccountUsagePanel
         account={account}
-        trends={trends}
+        trends={trendsQuery.data}
         resetCredits={resetCredits}
         resetCreditsLoading={resetCreditsLoading}
         resetCreditsUnavailable={resetCreditsUnavailable}

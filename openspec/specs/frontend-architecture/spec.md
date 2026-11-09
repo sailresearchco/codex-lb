@@ -4240,3 +4240,40 @@ The Accounts import dialog SHALL accept one or more auth.json files and send the
 
 - **WHEN** an import is pending
 - **THEN** the file input and submit action remain disabled
+
+### Requirement: Dashboard reads cancel obsolete requests
+
+Dashboard overview, projections, request logs and filter options, conversation lists and details, Reports data and options, thread identity, and account list, trends and reset-credit queries MUST pass their query-owned abort signal to the HTTP request. When a query loses its last observer or is replaced by a different query key, its pending HTTP request MUST be abortable without presenting cancellation as a request failure. Shared queries MUST remain active while another observer still needs them. Existing polling intervals and response contracts SHALL remain unchanged.
+
+#### Scenario: A timeframe change retires the previous read
+
+- **WHEN** the operator changes timeframe while the previous read is pending
+- **THEN** the previous request is aborted when no observer still needs it
+- **AND** the selected timeframe can load without showing the cancellation as an error
+
+### Requirement: Log search waits for typing to settle
+
+Request-log search text and URL state SHALL update immediately, but a changed search query MUST wait for 300 milliseconds without another search-text change before sending a request. A superseded pending read MUST be cancelled through its query-owned signal. Restored initial URL searches and changes to other filters SHALL not acquire an additional typing delay once search is settled.
+
+#### Scenario: Rapid search edits issue only the settled request
+
+- **WHEN** the operator changes search text repeatedly within 300 milliseconds
+- **THEN** no request is sent for intermediate search text
+- **AND** one request is sent for the final text after it settles
+
+### Requirement: Account and projection read failures remain actionable
+
+Accounts list, account trends, and dashboard projections failures MUST expose an announced error and a keyboard-operable Retry action that refetches only the failed query. Retry MUST be disabled while that query is fetching. Accounts with no list data MUST stop showing the loading skeleton after terminal failure. Cached data and independently healthy page content MUST remain usable after a read fails.
+
+#### Scenario: Accounts recover after an initial read failure
+
+- **WHEN** the initial accounts list read fails
+- **THEN** the page exposes Retry instead of an indefinite loading skeleton
+- **AND** activating Retry sends an accounts list request
+
+#### Scenario: Projection recovery does not reload the overview
+
+- **GIVEN** the overview loaded and projections failed
+- **WHEN** the operator retries projections
+- **THEN** only the projections query is refetched
+- **AND** the overview stays available

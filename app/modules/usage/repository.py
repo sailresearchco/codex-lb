@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Collection, Mapping
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
@@ -10,7 +9,6 @@ from hashlib import sha256
 from threading import RLock
 from typing import Any, Callable, Literal, cast
 
-from anyio import to_thread
 from sqlalchemy import (
     Integer,
     String,
@@ -35,6 +33,7 @@ from app.core.config.settings import get_settings
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.account_identity_lock import lock_postgresql_account_identities
+from app.db.dashboard_reads import run_sqlite_usage_read, sqlite_usage_read_connection, sqlite_usage_read_lock
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
 from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.db.sqlite_utils import sqlite_db_path_from_url
@@ -404,7 +403,7 @@ def _latest_by_account_sqlite(
     """
 
     latest: dict[str, UsageHistory] = {}
-    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
+    with sqlite_usage_read_connection(db_path) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=30000")
         accounts = [str(row[0]) for row in conn.execute(account_sql, account_params)]
@@ -436,10 +435,10 @@ def _bulk_history_since_sqlite(
     since: datetime,
 ) -> dict[str, list[UsageHistorySnapshot]]:
     cache_key = _bulk_history_cache_key(db_path, account_ids, window)
-    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
+    with sqlite_usage_read_connection(db_path) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=30000")
-        with _BULK_HISTORY_SQLITE_CACHE_LOCK:
+        with sqlite_usage_read_lock(_BULK_HISTORY_SQLITE_CACHE_LOCK):
             cached = _BULK_HISTORY_SQLITE_CACHE.get(cache_key)
             if cached is not None and cached.since <= since:
                 metadata = _query_bulk_history_metadata_sqlite(
@@ -553,7 +552,7 @@ def _bulk_history_since_capped_sqlite(
 
     grouped: dict[str, list[UsageHistorySnapshot]] = {}
 
-    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
+    with sqlite_usage_read_connection(db_path) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=30000")
 
@@ -986,7 +985,7 @@ class UsageRepository:
         dialect = bind.dialect.name if bind else "sqlite"
         sqlite_path = _sqlite_path_from_bind(bind) if dialect == "sqlite" else None
         if sqlite_path is not None:
-            return await to_thread.run_sync(
+            return await run_sqlite_usage_read(
                 _latest_by_account_sqlite,
                 str(sqlite_path),
                 window,
@@ -1097,7 +1096,7 @@ class UsageRepository:
         sqlite_path = _sqlite_path_from_bind(bind) if dialect == "sqlite" else None
         if sqlite_path is not None:
             if per_account_row_cap is not None:
-                return await to_thread.run_sync(
+                return await run_sqlite_usage_read(
                     partial(
                         _bulk_history_since_capped_sqlite,
                         str(sqlite_path),
@@ -1109,7 +1108,7 @@ class UsageRepository:
                         uncapped_recent_floor=uncapped_recent_floor,
                     )
                 )
-            return await to_thread.run_sync(
+            return await run_sqlite_usage_read(
                 _bulk_history_since_sqlite,
                 str(sqlite_path),
                 list(account_ids),

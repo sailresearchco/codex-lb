@@ -6,6 +6,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Button } from "@/components/ui/button";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
@@ -165,8 +166,25 @@ export function AccountsPage() {
         <AlertMessage variant="error">{mutationError}</AlertMessage>
       ) : null}
 
+      {accountsQuery.error ? (
+        <div className="space-y-3">
+          <div role="alert">
+            <AlertMessage variant="error">{getErrorMessageOrNull(accountsQuery.error)}</AlertMessage>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void accountsQuery.refetch()}
+            disabled={accountsQuery.isFetching}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
+      ) : null}
+
       {!accountsQuery.data ? (
-        <AccountsSkeleton />
+        accountsQuery.error ? null : <AccountsSkeleton />
       ) : (
         <div
           data-testid="accounts-layout"

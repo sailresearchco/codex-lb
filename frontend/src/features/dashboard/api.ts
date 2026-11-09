@@ -55,17 +55,17 @@ function appendMany(params: URLSearchParams, key: string, values?: string[]): vo
   }
 }
 
-export function getDashboardOverview(params: DashboardOverviewParams = {}) {
+export function getDashboardOverview(params: DashboardOverviewParams = {}, signal?: AbortSignal) {
   const query = new URLSearchParams();
   query.set("timeframe", params.timeframe ?? DEFAULT_OVERVIEW_TIMEFRAME);
-  return get(`${DASHBOARD_PATH}/overview?${query.toString()}`, DashboardOverviewSchema);
+  return get(`${DASHBOARD_PATH}/overview?${query.toString()}`, DashboardOverviewSchema, { signal });
 }
 
-export function getDashboardProjections() {
-  return get(`${DASHBOARD_PATH}/projections`, DashboardProjectionsSchema);
+export function getDashboardProjections(signal?: AbortSignal) {
+  return get(`${DASHBOARD_PATH}/projections`, DashboardProjectionsSchema, { signal });
 }
 
-export function getRequestLogs(params: RequestLogsListFilters = {}) {
+export function getRequestLogs(params: RequestLogsListFilters = {}, signal?: AbortSignal) {
   const query = new URLSearchParams();
   if (typeof params.limit === "number") {
     query.set("limit", String(params.limit));
@@ -93,10 +93,10 @@ export function getRequestLogs(params: RequestLogsListFilters = {}) {
     query.set("until", params.until);
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return get(`${REQUEST_LOGS_PATH}${suffix}`, RequestLogsResponseSchema);
+  return get(`${REQUEST_LOGS_PATH}${suffix}`, RequestLogsResponseSchema, { signal });
 }
 
-export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {
+export function getRequestLogOptions(params: RequestLogFacetFilters = {}, signal?: AbortSignal) {
   const query = new URLSearchParams();
   if (params.timeframe) {
     query.set("timeframe", params.timeframe);
@@ -111,7 +111,7 @@ export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {
   appendMany(query, "apiKeyId", params.apiKeyIds);
   appendMany(query, "modelOption", params.modelOptions);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return get(`${REQUEST_LOGS_PATH}/options${suffix}`, RequestLogFilterOptionsSchema);
+  return get(`${REQUEST_LOGS_PATH}/options${suffix}`, RequestLogFilterOptionsSchema, { signal });
 }
 
 export type ConversationListFilters = {
@@ -122,7 +122,7 @@ export type ConversationListFilters = {
   since?: string;
 };
 
-export function getConversations(params: ConversationListFilters = {}) {
+export function getConversations(params: ConversationListFilters = {}, signal?: AbortSignal) {
   const query = new URLSearchParams();
   if (typeof params.limit === "number") {
     query.set("limit", String(params.limit));
@@ -140,13 +140,13 @@ export function getConversations(params: ConversationListFilters = {}) {
     query.set("since", params.since);
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return get(`${CONVERSATIONS_PATH}${suffix}`, ConversationsResponseSchema);
+  return get(`${CONVERSATIONS_PATH}${suffix}`, ConversationsResponseSchema, { signal });
 }
 
-export function getConversationDetails(conversationId: string) {
+export function getConversationDetails(conversationId: string, signal?: AbortSignal) {
   const opaqueId = conversationId === "." || conversationId === ".."
     ? ` ${conversationId}`
     : conversationId;
   const encoded = encodeURIComponent(opaqueId);
-  return get(`${CONVERSATIONS_PATH}/${encoded}`, ConversationDetailsSchema);
+  return get(`${CONVERSATIONS_PATH}/${encoded}`, ConversationDetailsSchema, { signal });
 }
