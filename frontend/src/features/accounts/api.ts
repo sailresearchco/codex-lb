@@ -37,8 +37,8 @@ import type {
 const ACCOUNTS_BASE_PATH = "/api/accounts";
 const OAUTH_BASE_PATH = "/api/oauth";
 
-export function listAccounts() {
-  return get(ACCOUNTS_BASE_PATH, AccountsResponseSchema);
+export function listAccounts(signal?: AbortSignal) {
+  return get(ACCOUNTS_BASE_PATH, AccountsResponseSchema, { signal });
 }
 
 export function importAccount(file: File) {
@@ -102,17 +102,19 @@ export function updateAccountRoutingPolicy(
   );
 }
 
-export function getAccountTrends(accountId: string) {
+export function getAccountTrends(accountId: string, signal?: AbortSignal) {
   return get(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/trends`,
     AccountTrendsResponseSchema,
+    { signal },
   );
 }
 
-export function getAccountUsageResetCredits(accountId: string) {
+export function getAccountUsageResetCredits(accountId: string, signal?: AbortSignal) {
   return get(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/usage-reset-credits`,
     AccountUsageResetCreditsResponseSchema,
+    { signal },
   );
 }
 
@@ -144,10 +146,11 @@ export function exportAccountAuth(accountId: string) {
   );
 }
 
-export function getRateLimitResetCredits(accountId: string) {
+export function getRateLimitResetCredits(accountId: string, signal?: AbortSignal) {
   return get(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/rate-limit-reset-credits`,
     RateLimitResetCreditsSnapshotSchema.nullable(),
+    { signal },
   );
 }
 

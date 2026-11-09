@@ -36,18 +36,19 @@ function reportQuery(params: ReportsParams): string {
   return suffix;
 }
 
-export function getReports(params: ReportsParams = {}) {
-  return get(`/api/reports${reportQuery(params)}`, ReportsResponseSchema);
+export function getReports(params: ReportsParams = {}, signal?: AbortSignal) {
+  return get(`/api/reports${reportQuery(params)}`, ReportsResponseSchema, { signal });
 }
 
-export function getReportsOptions(params: Omit<ReportsParams, "model" | "useragent"> = {}) {
-  return get(`/api/reports/options${reportQuery(params)}`, ReportsOptionsResponseSchema);
+export function getReportsOptions(params: Omit<ReportsParams, "model" | "useragent"> = {}, signal?: AbortSignal) {
+  return get(`/api/reports/options${reportQuery(params)}`, ReportsOptionsResponseSchema, { signal });
 }
 
 // Thread identity is deliberately scoped by the date range alone: an account
 // or model filter would change what "accounts per conversation" means.
 export function getThreadIdentity(
   params: Pick<ReportsParams, "startDate" | "endDate" | "timezone"> = {},
+  signal?: AbortSignal,
 ) {
-  return get(`/api/reports/thread-identity${reportQuery(params)}`, ThreadIdentityResponseSchema);
+  return get(`/api/reports/thread-identity${reportQuery(params)}`, ThreadIdentityResponseSchema, { signal });
 }

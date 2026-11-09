@@ -264,7 +264,7 @@ export function useRateLimitResetCredits(
 ) {
   return useQuery({
     queryKey: ["accounts", "reset-credits", accountId],
-    queryFn: () => getRateLimitResetCredits(accountId as string),
+    queryFn: ({ signal }) => getRateLimitResetCredits(accountId as string, signal),
     enabled: enabled && !!accountId,
     staleTime: 0,
   });
@@ -273,7 +273,7 @@ export function useRateLimitResetCredits(
 export function useAccountTrends(accountId: string | null) {
   return useQuery({
     queryKey: ["accounts", "trends", accountId],
-    queryFn: () => getAccountTrends(accountId!),
+    queryFn: ({ signal }) => getAccountTrends(accountId!, signal),
     enabled: !!accountId,
     staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
@@ -284,7 +284,7 @@ export function useAccountTrends(accountId: string | null) {
 export function useAccountUsageResetCredits(accountId: string | null) {
   return useQuery({
     queryKey: ["accounts", "usage-reset-credits", accountId],
-    queryFn: () => getAccountUsageResetCredits(accountId!),
+    queryFn: ({ signal }) => getAccountUsageResetCredits(accountId!, signal),
     enabled: !!accountId,
     staleTime: 60_000,
   });
@@ -293,7 +293,7 @@ export function useAccountUsageResetCredits(accountId: string | null) {
 export function useAccounts() {
   const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["accounts", "list"],
-    queryFn: listAccounts,
+    queryFn: ({ signal }) => listAccounts(signal),
     select: (data) => data.accounts,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

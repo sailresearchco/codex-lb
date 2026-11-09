@@ -5,9 +5,9 @@ from datetime import datetime
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import event, insert, text
+from sqlalchemy import insert, text
 
-import app.db.session as db_session
+import app.db.dashboard_reads as dashboard_reads
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, ApiKey, RequestLog
 from app.db.session import SessionLocal, engine
@@ -22,6 +22,7 @@ async def test_options_avoid_repeated_live_cohort_scans(
     db_setup: bool,
     live_facet_indexes: bool,
     record_property: Callable[[str, int], None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del db_setup
     now = datetime(2026, 9, 9)
@@ -105,24 +106,18 @@ async def test_options_avoid_repeated_live_cohort_scans(
     # connection lifecycle. This catches rescans without a wall-clock flake.
     operations = 0
 
-    def count_operations() -> int:
+    original_progress = dashboard_reads._ReadBudget.progress
+
+    def count_operations(budget: dashboard_reads._ReadBudget) -> int:
         nonlocal operations
         operations += 100
-        return 0
+        return original_progress(budget)
 
-    def instrument_connection(connection, _record) -> None:
-        connection.run_async(lambda driver: driver.set_progress_handler(count_operations, 100))
-
-    background_engine = db_session._background_engine
-    assert background_engine is not None
-    observed_engines = {engine.sync_engine, background_engine.sync_engine}
-    for observed in observed_engines:
-        event.listen(observed, "connect", instrument_connection)
-    try:
-        response = await async_client.get("/api/request-logs/options")
-    finally:
-        for observed in observed_engines:
-            event.remove(observed, "connect", instrument_connection)
+    # SQLite has one callback slot. Count through the real deadline handler
+    # instead of installing a connect hook that the read dependency replaces.
+    monkeypatch.setattr(dashboard_reads, "_PROGRESS_STEPS", 100)
+    monkeypatch.setattr(dashboard_reads._ReadBudget, "progress", count_operations)
+    response = await async_client.get("/api/request-logs/options")
 
     assert response.status_code == 200
     assert response.json() == {

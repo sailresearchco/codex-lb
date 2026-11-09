@@ -18,7 +18,7 @@ export function useReports(
   return useQuery({
     enabled: isReportDateRangeValid(filters.startDate, filters.endDate),
     queryKey: ["reports", filters, timeZone],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       getReports({
         startDate: filters.startDate,
         endDate: filters.endDate,
@@ -30,7 +30,7 @@ export function useReports(
         model: filters.model || undefined,
         useragent: filters.useragent || undefined,
         timezone: timeZone,
-      }),
+      }, signal),
     staleTime: 5 * 60_000,
     refetchInterval: false,
     refetchOnWindowFocus: false,
@@ -49,7 +49,7 @@ export function useReportsOptions(filters: ReportsFilterState, timeZone: string 
   return useQuery({
     queryKey: ["reports-options", scope],
     enabled: isReportDateRangeValid(filters.startDate, filters.endDate),
-    queryFn: () => getReportsOptions(scope),
+    queryFn: ({ signal }) => getReportsOptions(scope, signal),
     staleTime: 5 * 60_000,
     refetchInterval: false,
     refetchOnWindowFocus: false,
@@ -74,7 +74,7 @@ export function useThreadIdentity(
   return useQuery({
     enabled: enabled && isReportDateRangeValid(filters.startDate, filters.endDate),
     queryKey: ["reports-thread-identity", scope],
-    queryFn: () => getThreadIdentity(scope),
+    queryFn: ({ signal }) => getThreadIdentity(scope, signal),
     staleTime: THREAD_IDENTITY_STALE_TIME_MS,
     refetchInterval: false,
     refetchOnWindowFocus: false,

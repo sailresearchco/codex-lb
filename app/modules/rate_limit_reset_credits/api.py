@@ -44,7 +44,7 @@ from app.core.exceptions import (
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.models import Account, AccountStatus
-from app.dependencies import AccountsContext, get_accounts_context
+from app.dependencies import AccountsContext, get_accounts_context, get_accounts_read_context
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.schemas import AccountUsageResetConsumeRequest
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -130,7 +130,7 @@ class ResetCreditRedeemRequestAlreadyPinned(Exception):
 )
 async def get_rate_limit_reset_credits(
     account_id: str,
-    context: AccountsContext = Depends(get_accounts_context),
+    context: AccountsContext = Depends(get_accounts_read_context),
 ) -> RateLimitResetCreditsSnapshotResponse | None:
     store = get_rate_limit_reset_credits_store()
     account = await context.repository.get_by_id(account_id)

@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Protocol, TypeVar
 
 import anyio
 from anyio import to_thread
@@ -1065,7 +1065,7 @@ async def sqlite_writer_section() -> AsyncIterator[None]:
         yield
 
 
-async def get_session() -> AsyncIterator[AsyncSession]:
+async def get_session() -> AsyncGenerator[AsyncSession]:
     session = SessionLocal()
     try:
         yield session

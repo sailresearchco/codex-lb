@@ -23,7 +23,7 @@ from app.core.middleware.multipart_content_encoding import raise_for_unsupported
 from app.core.multipart import ACCOUNT_IMPORT_MULTIPART_POLICY, bounded_multipart_form, read_bounded_upload
 from app.core.multipart_fields import required_upload
 from app.core.upstream_proxy import UpstreamProxyRouteError
-from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
+from app.dependencies import AccountsContext, get_accounts_context, get_accounts_read_context, get_proxy_service_for_app
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
@@ -99,7 +99,7 @@ _ACCOUNT_IMPORT_OPENAPI_EXTRA = {
 @router.get("", response_model=AccountsResponse)
 async def list_accounts(
     principal: DashboardPrincipal = Depends(validate_dashboard_session),
-    context: AccountsContext = Depends(get_accounts_context),
+    context: AccountsContext = Depends(get_accounts_read_context),
 ) -> AccountsResponse:
     accounts = await context.service.list_accounts(
         redact_identity=not principal.has(Permission.ACCOUNTS_WRITE),
@@ -110,7 +110,7 @@ async def list_accounts(
 @router.get("/{account_id}/trends", response_model=AccountTrendsResponse)
 async def get_account_trends(
     account_id: str,
-    context: AccountsContext = Depends(get_accounts_context),
+    context: AccountsContext = Depends(get_accounts_read_context),
 ) -> AccountTrendsResponse:
     result = await context.service.get_account_trends(account_id)
     if not result:

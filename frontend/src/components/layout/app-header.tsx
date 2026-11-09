@@ -61,7 +61,7 @@ export function AppHeader({
   const PrivacyIcon = blurred ? EyeOff : Eye;
   const { data: accounts = [] } = useQuery({
     queryKey: ["accounts", "list"],
-    queryFn: listAccounts,
+    queryFn: ({ signal }) => listAccounts(signal),
     select: (data) => data.accounts,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

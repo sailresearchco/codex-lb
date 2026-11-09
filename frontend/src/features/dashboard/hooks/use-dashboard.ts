@@ -11,7 +11,7 @@ export function useDashboard(timeframe: OverviewTimeframe = DEFAULT_OVERVIEW_TIM
   const refreshSeconds = useDashboardPreferencesStore((state) => state.refreshSeconds);
   return useQuery({
     queryKey: ["dashboard", "overview", timeframe],
-    queryFn: () => getDashboardOverview({ timeframe }),
+    queryFn: ({ signal }) => getDashboardOverview({ timeframe }, signal),
     refetchInterval: refreshSeconds * 1_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
@@ -22,7 +22,7 @@ export function useDashboardProjections(enabled = true) {
   const refreshSeconds = useDashboardPreferencesStore((state) => state.refreshSeconds);
   return useQuery({
     queryKey: ["dashboard", "projections"],
-    queryFn: getDashboardProjections,
+    queryFn: ({ signal }) => getDashboardProjections(signal),
     enabled,
     refetchInterval: refreshSeconds * 1_000,
     refetchIntervalInBackground: false,

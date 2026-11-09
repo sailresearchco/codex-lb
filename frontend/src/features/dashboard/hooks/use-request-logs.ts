@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import {
@@ -134,6 +134,18 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     }
     setSearchParams(writeFilterState(filters, searchParams), { replace: true });
   }, [filters, hasHiddenApiKeyParams, searchParams, setSearchParams]);
+  // Change the query key immediately to retire the previous read, then admit
+  // the new search only after typing settles, including a return to older text.
+  const [searchAdmission, setSearchAdmission] = useState({ search: filters.search, settled: true });
+  if (searchAdmission.search !== filters.search) {
+    setSearchAdmission({ search: filters.search, settled: false });
+  }
+  useEffect(() => {
+    if (searchAdmission.settled) return;
+    const timer = window.setTimeout(() => setSearchAdmission({ ...searchAdmission, settled: true }), 300);
+    return () => window.clearTimeout(timer);
+  }, [searchAdmission]);
+
   const filtersApplied = requestLogFiltersApplied(filters);
   const timeframe = filters.timeframe === "all" ? undefined : filters.timeframe;
   const listFilters = useMemo<RequestLogsListFilters>(
@@ -171,11 +183,11 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     refetch: refetchLogs,
   } = useQuery({
     queryKey: ["dashboard", "request-logs", listFilters],
-    queryFn: async () => ({
-      page: await getRequestLogs(listFilters),
+    queryFn: async ({ signal }) => ({
+      page: await getRequestLogs(listFilters, signal),
       filtersApplied,
     }),
-    enabled,
+    enabled: enabled && searchAdmission.search === filters.search && searchAdmission.settled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
@@ -205,7 +217,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     refetch: refetchOptions,
   } = useQuery({
     queryKey: ["dashboard", "request-log-options", facetFilters],
-    queryFn: () => getRequestLogOptions(facetFilters),
+    queryFn: ({ signal }) => getRequestLogOptions(facetFilters, signal),
     enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

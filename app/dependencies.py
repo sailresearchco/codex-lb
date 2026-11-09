@@ -8,6 +8,7 @@ from typing import cast
 from fastapi import Depends, FastAPI, Request, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.dashboard_reads import get_dashboard_read_session
 from app.db.session import get_background_session, get_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
@@ -229,6 +230,12 @@ def get_accounts_context(
     )
 
 
+def get_accounts_read_context(
+    session: AsyncSession = Depends(get_dashboard_read_session),
+) -> AccountsContext:
+    return get_accounts_context(session)
+
+
 def get_audit_context(
     session: AsyncSession = Depends(get_session),
 ) -> AuditContext:
@@ -383,7 +390,7 @@ def get_model_sources_context(
 
 
 def get_request_logs_context(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_dashboard_read_session),
 ) -> RequestLogsContext:
     repository = RequestLogsRepository(session)
     service = RequestLogsService(repository)
@@ -406,7 +413,7 @@ def get_settings_context(
 
 
 def get_dashboard_context(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_dashboard_read_session),
 ) -> DashboardContext:
     repository = DashboardRepository(session)
     service = DashboardService(repository)
@@ -436,7 +443,7 @@ def get_sticky_sessions_context(
 
 
 def get_reports_context(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_dashboard_read_session),
 ) -> ReportsContext:
     repository = ReportsRepository(session)
     service = ReportsService(repository)

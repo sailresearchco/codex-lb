@@ -435,6 +435,23 @@ export function DashboardPage() {
 
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
 
+      {projectionsQuery.error ? (
+        <div className="space-y-3">
+          <div role="alert">
+            <AlertMessage variant="error">{getErrorMessageOrNull(projectionsQuery.error)}</AlertMessage>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void projectionsQuery.refetch()}
+            disabled={projectionsQuery.isFetching}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
+      ) : null}
+
       {(dashboardQuery.isPending || dashboardQuery.isFetching) &&
       !view &&
       displayedDashboardLoadError === null ? (

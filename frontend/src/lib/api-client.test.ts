@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { ApiError, put, setStepUpHandlers } from "@/lib/api-client";
+import { ApiError, get, put, setStepUpHandlers } from "@/lib/api-client";
 
 const okSchema = z.object({ status: z.string() });
 
@@ -22,6 +22,16 @@ describe("api-client step-up", () => {
   afterEach(() => {
     setStepUpHandlers(null);
     vi.unstubAllGlobals();
+  });
+
+  it("preserves the caller's abort instead of converting it to a network failure", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal("fetch", vi.fn((_url: string, options: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+    })));
+    const pending = get("/api/dashboard/overview", okSchema, { signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toBe(controller.signal.reason);
   });
 
   it("runs the step-up flow once and replays the request when it succeeds", async () => {

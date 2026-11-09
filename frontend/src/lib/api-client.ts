@@ -199,6 +199,7 @@ async function request<T>(
       cache: options?.cache,
     });
   } catch (error) {
+    if (options?.signal?.aborted) throw error;
     throw new ApiError({
       status: 0,
       code: "network_error",
