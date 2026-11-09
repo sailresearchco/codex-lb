@@ -1,0 +1,28 @@
+name: Sailbox systemd
+
+on:
+  pull_request:
+    paths:
+      - deploy/sailbox/**
+      - .github/scripts/test_sailbox_systemd.sh
+      - .github/workflows/sailbox-systemd.yml
+  push:
+    branches: [main]
+    paths:
+      - deploy/sailbox/**
+      - .github/scripts/test_sailbox_systemd.sh
+      - .github/workflows/sailbox-systemd.yml
+
+permissions:
+  contents: read
+
+jobs:
+  supervise:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify service restart and graceful stop
+        run: sudo bash .github/scripts/test_sailbox_systemd.sh
