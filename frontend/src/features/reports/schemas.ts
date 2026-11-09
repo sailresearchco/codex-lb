@@ -68,6 +68,11 @@ const ReportComparisonSchema = z.object({
 export const ReportsOptionsResponseSchema = z.object({
   models: z.array(z.string()),
   useragents: z.array(z.string()),
+  apiKeys: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    keyPrefix: z.string().nullable().optional().default(null),
+  })).optional().default([]),
 });
 
 export const ReportsResponseSchema = z.object({

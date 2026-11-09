@@ -5,7 +5,6 @@ import { useTranslation } from "react-i18next";
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import { listAccounts } from "@/features/accounts/api";
-import { getRequestLogOptions } from "@/features/dashboard/api";
 import {
   useReports,
   useReportsOptions,
@@ -138,14 +137,6 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     queryKey: ["accounts", "reports-filter"],
     queryFn: ({ signal }) => listAccounts(signal),
   });
-  const {
-    data: apiKeysOptionsData,
-    error: apiKeysError,
-    refetch: refetchApiKeys,
-  } = useQuery({
-    queryKey: ["request-log-options", "reports-filter"],
-    queryFn: ({ signal }) => getRequestLogOptions({}, signal),
-  });
 
   const accountOptions = useMemo(
     () =>
@@ -163,11 +154,11 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
   const apiKeyOptions = useMemo(
     () =>
-      (apiKeysOptionsData?.apiKeys ?? []).map((key) => ({
+      (filterCatalogQuery.data?.apiKeys ?? []).map((key) => ({
         value: key.id,
         label: key.keyPrefix ? `${key.name} · ${key.keyPrefix}` : key.name,
       })),
-    [apiKeysOptionsData],
+    [filterCatalogQuery.data],
   );
 
   const modelOptions = useMemo(
@@ -191,16 +182,15 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   const mainReportsError = getErrorMessageOrNull(reportsQuery.error);
   const sharedOptionsError = getErrorMessageOrNull(filterCatalogQuery.error);
   const accountOptionsError = getErrorMessageOrNull(accountsError);
-  const apiKeyOptionsError = getErrorMessageOrNull(apiKeysError);
   const threadIdentityError = getErrorMessageOrNull(threadIdentityQuery.error);
 
   const hasAnyError = Boolean(
-    mainReportsError || sharedOptionsError || accountOptionsError || apiKeyOptionsError,
+    mainReportsError || sharedOptionsError || accountOptionsError,
   );
 
   const handleRetry = async () => {
     if (!isReportDateRangeValid(filters.startDate, filters.endDate)) {
-      await Promise.allSettled([refetchAccounts(), refetchApiKeys()]);
+      await refetchAccounts();
       return;
     }
 
@@ -208,7 +198,6 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
       reportsQuery.refetch(),
       filterCatalogQuery.refetch(),
       refetchAccounts(),
-      refetchApiKeys(),
       ...(visibleChartIds.includes("threadIdentity") ? [threadIdentityQuery.refetch()] : []),
     ]);
   };
@@ -282,23 +271,6 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         <div className="flex items-center justify-between gap-2">
           <AlertMessage variant="error" className="flex-1">
             {t("reports.errors.accounts", { error: accountOptionsError })}
-          </AlertMessage>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void handleRetry();
-            }}
-          >
-            {t("common.actions.retry")}
-          </Button>
-        </div>
-      ) : null}
-      {apiKeyOptionsError ? (
-        <div className="flex items-center justify-between gap-2">
-          <AlertMessage variant="error" className="flex-1">
-            {t("reports.errors.apiKeys", { error: apiKeyOptionsError })}
           </AlertMessage>
           <Button
             type="button"

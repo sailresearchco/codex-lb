@@ -78,7 +78,7 @@ def report_source(
     ]
     # Catalog never calculates measures or groups by conversations.
     folded_columns = (
-        folded_dimensions[2:4]
+        folded_dimensions[1:4]
         if catalog
         else [w.c.report_date, *folded_dimensions, r.first_requested_at, *(getattr(r, n) for n in MEASURES)]
     )
@@ -90,7 +90,7 @@ def report_source(
         )
     )
     raw_columns = (
-        raw_dimensions[2:4]
+        raw_dimensions[1:4]
         if catalog
         else [
             w.c.report_date,
@@ -130,7 +130,7 @@ def report_source(
             else source.c.useragent_group == useragent_group
         )
     # Scoped catalogs need their account/API-key predicates pushed into each
-    # branch, since those dimensions intentionally aren't in the result.
+    # branch, since the account dimension intentionally isn't in the result.
     if catalog:
         from app.modules.accounts.usage_time_rollup import to_dimension
 

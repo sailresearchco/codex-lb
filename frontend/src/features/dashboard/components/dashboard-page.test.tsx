@@ -222,9 +222,10 @@ describe("DashboardPage", () => {
       error: null,
     } as ReturnType<typeof useDashboardProjections>);
     useRequestLogsMock.mockReturnValue({
+      rangeValid: true,
       filters: {
         search: "",
-        timeframe: "all",
+        timeframe: "24h",
         accountIds: [],
         apiKeyIds: [],
         modelOptions: [],
@@ -308,7 +309,7 @@ describe("DashboardPage", () => {
     expect(screen.queryByRole("heading", { name: "Accounts" })).not.toBeInTheDocument();
   });
 
-  it("renders request-log loading inside its section without hiding overview content", () => {
+  it("keeps request-log controls usable while its first read is pending", async () => {
     mockReadyDashboard({
       data: undefined,
       error: null,
@@ -327,7 +328,10 @@ describe("DashboardPage", () => {
 
     expect(requestLogsSection).not.toBeNull();
     expect(within(requestLogsSection as HTMLElement).getByText("Loading...")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /reset/i })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: /reset/i }));
+    expect(useRequestLogsMock.mock.results.at(-1)?.value.updateFilters).toHaveBeenCalledWith(
+      expect.objectContaining({ timeframe: "24h", offset: 0 }),
+    );
     expect(screen.queryByTestId("recent-requests-table")).not.toBeInTheDocument();
   });
 
@@ -668,9 +672,10 @@ describe("DashboardPage", () => {
     mockReadyDashboard();
     const updateFilters = vi.fn();
     useRequestLogsMock.mockReturnValue({
+      rangeValid: true,
       filters: {
         search: "",
-        timeframe: "all",
+        timeframe: "24h",
         accountIds: [],
         apiKeyIds: [],
         modelOptions: [],
@@ -724,6 +729,7 @@ describe("DashboardPage", () => {
     const updateFilters = vi.fn();
 
     useRequestLogsMock.mockReturnValue({
+      rangeValid: true,
       filters: {
         search: "quota",
         timeframe: "24h",
@@ -829,6 +835,7 @@ describe("DashboardPage", () => {
     const updateFilters = vi.fn();
 
     useRequestLogsMock.mockReturnValue({
+      rangeValid: true,
       filters: {
         search: "test_search",
         timeframe: "7d",
@@ -894,71 +901,12 @@ describe("DashboardPage", () => {
     expect(summaryEl.textContent).toMatch(/API Keys/);
   });
 
-  it("omits summary suffix when no other filters are active", () => {
-    mockReadyDashboard();
-    const updateFilters = vi.fn();
-
-    useRequestLogsMock.mockReturnValue({
-      filters: {
-        search: "",
-        timeframe: "all",
-        accountIds: [],
-        apiKeyIds: [],
-        modelOptions: [],
-        statuses: [],
-        conversationId: "conv_no_suffix",
-        limit: 25,
-        offset: 0,
-      },
-      listFilters: { search: undefined, limit: 25, offset: 0, accountIds: [], apiKeyIds: [], statuses: [], modelOptions: [], since: undefined },
-      facetFilters: { since: undefined, accountIds: [], apiKeyIds: [], modelOptions: [] },
-      logsQuery: {
-        data: {
-          requests: [],
-          total: 0,
-          hasMore: false,
-          conversation: { requestCount: 7, aggregatedCostUsd: 0.05 },
-        },
-        isFetching: false,
-        error: null,
-        isLoading: false,
-        isPending: false,
-        isSuccess: true,
-        refetch: vi.fn(),
-      },
-      optionsQuery: {
-        data: { accountIds: [], apiKeys: [], modelOptions: [], statuses: [] },
-        error: null,
-      },
-      updateFilters,
-    } as unknown as ReturnType<typeof useRequestLogs>);
-
-    buildDashboardViewMock.mockReturnValue({
-      stats: [],
-      weeklyCreditPace: null,
-      primaryUsageItems: [],
-      secondaryUsageItems: [],
-      primaryTotal: 0,
-      secondaryTotal: 0,
-      safeLinePrimary: null,
-      safeLineSecondary: null,
-      requestLogs: [],
-    } as ReturnType<typeof buildDashboardView>);
-
-    renderWithProviders(<DashboardPage />);
-
-    const summaryEl = screen.getByText((_, el) => el?.tagName === "P" && (el?.textContent?.includes("The conversation conv_no_suffix") ?? false));
-    expect(summaryEl).toBeInTheDocument();
-    // No filter suffix separator
-    expect(summaryEl.textContent).not.toMatch(/filters:/i);
-    expect(summaryEl.textContent).toMatch(/request\(s\), cost =/);
-  });
-
   it("dismiss button clears conversationId and resets offset, preserving other filters", () => {
     mockReadyDashboard();
     const updateFilters = vi.fn();
 
     useRequestLogsMock.mockReturnValue({
+      rangeValid: true,
       filters: {
         search: "test",
         timeframe: "7d",
@@ -1019,6 +967,7 @@ describe("DashboardPage", () => {
     const updateFilters = vi.fn();
 
     useRequestLogsMock.mockReturnValue({
+      rangeValid: true,
       filters: {
         search: "test",
         timeframe: "7d",
@@ -1072,7 +1021,7 @@ describe("DashboardPage", () => {
 
     expect(updateFilters).toHaveBeenCalledWith({
       search: "",
-      timeframe: "all",
+      timeframe: "24h",
       accountIds: [],
       apiKeyIds: [],
       modelOptions: [],

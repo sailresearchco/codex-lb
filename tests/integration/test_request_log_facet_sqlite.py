@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
@@ -11,21 +12,28 @@ import app.db.dashboard_reads as dashboard_reads
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, ApiKey, RequestLog
 from app.db.session import SessionLocal, engine
+from app.modules.request_logs import api as logs_api
+from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.request_logs.service import RequestLogsService
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(engine.dialect.name != "sqlite", reason="SQLite query plans")]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("live_facet_indexes", [False, True])
+@pytest.mark.parametrize("bounded_api", [False, True])
 async def test_options_avoid_repeated_live_cohort_scans(
     async_client: AsyncClient,
     db_setup: bool,
     live_facet_indexes: bool,
+    bounded_api: bool,
     record_property: Callable[[str, int], None],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del db_setup
     now = datetime(2026, 9, 9)
+    recent = now + timedelta(days=60)
+    monkeypatch.setattr(logs_api, "utcnow", lambda: recent + timedelta(hours=1))
     encryptor = TokenEncryptor()
     async with SessionLocal() as session:
         session.add_all(
@@ -50,14 +58,14 @@ async def test_options_avoid_repeated_live_cohort_scans(
                     "request_id": f"facet-{index}",
                     "account_id": "facet-a" if index % 2 else "facet-b",
                     "api_key_id": "facet-key",
-                    "requested_at": now,
+                    "requested_at": recent if index >= 20_000 else now,
                     "model": "model-a" if index % 2 else "model-b",
                     "reasoning_effort": "high" if index % 3 else None,
                     "status": "success" if index % 2 else "error",
                     "error_code": None if index % 2 else "rate_limit_exceeded",
                     "deleted_at": now if index % 5 == 0 else None,
                 }
-                for index in range(20_000)
+                for index in range(20_032 if bounded_api else 20_000)
             ],
         )
         await session.execute(
@@ -67,7 +75,7 @@ async def test_options_avoid_repeated_live_cohort_scans(
                     "request_id": f"visibility-{index}",
                     "account_id": "facet-a",
                     "api_key_id": "facet-key",
-                    "requested_at": now,
+                    "requested_at": recent if bounded_api else now,
                     "model": model,
                     "reasoning_effort": effort,
                     "status": status,
@@ -102,8 +110,8 @@ async def test_options_avoid_repeated_live_cohort_scans(
         await session.commit()
         assert not (await session.execute(text("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'"))).all()
 
-    # Count SQLite VM work for the real HTTP endpoint, including its actual
-    # connection lifecycle. This catches rescans without a wall-clock flake.
+    # Keep the unscoped repository's skip-scan regression and separately prove
+    # the bounded API reads only the small recent cohort, despite retained history.
     operations = 0
 
     original_progress = dashboard_reads._ReadBudget.progress
@@ -117,10 +125,23 @@ async def test_options_avoid_repeated_live_cohort_scans(
     # instead of installing a connect hook that the read dependency replaces.
     monkeypatch.setattr(dashboard_reads, "_PROGRESS_STEPS", 100)
     monkeypatch.setattr(dashboard_reads._ReadBudget, "progress", count_operations)
-    response = await async_client.get("/api/request-logs/options")
+    if bounded_api:
+        response = await async_client.get("/api/request-logs/options")
+        assert response.status_code == 200
+        payload = response.json()
+    else:
+        async with asynccontextmanager(dashboard_reads.get_dashboard_read_session)() as session:
+            options = await RequestLogsService(RequestLogsRepository(session)).list_filter_options()
+        payload = {
+            "accountIds": options.account_ids,
+            "apiKeys": [{"id": key.id, "name": key.name, "keyPrefix": key.key_prefix} for key in options.api_keys],
+            "modelOptions": [
+                {"model": option.model, "reasoningEffort": option.reasoning_effort} for option in options.model_options
+            ],
+            "statuses": options.statuses,
+        }
 
-    assert response.status_code == 200
-    assert response.json() == {
+    assert payload == {
         "accountIds": ["facet-a", "facet-b"],
         "apiKeys": [{"id": "facet-key", "name": "Facet key", "keyPrefix": "sk-facet"}],
         "modelOptions": [
@@ -133,4 +154,4 @@ async def test_options_avoid_repeated_live_cohort_scans(
         "statuses": ["ok", "rate_limit"],
     }
     record_property("sqlite_vm_operations", operations)
-    assert 0 < operations < 20_000, f"Unfiltered options executed {operations:,} SQLite VM operations"
+    assert 0 < operations < 20_000, f"Options (bounded_api={bounded_api}) executed {operations:,} SQLite VM operations"

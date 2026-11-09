@@ -10,7 +10,6 @@ import type {
   ThreadIdentityResponse,
 } from "@/features/reports/schemas";
 import { listAccounts } from "@/features/accounts/api";
-import { getRequestLogOptions } from "@/features/dashboard/api";
 import { getBrowserReportsTimeZone } from "@/features/reports/date";
 import {
   useReports,
@@ -25,10 +24,6 @@ import { ReportsPage } from "./reports-page";
 
 vi.mock("@/features/accounts/api", () => ({
   listAccounts: vi.fn().mockResolvedValue({ accounts: [] }),
-}));
-
-vi.mock("@/features/dashboard/api", () => ({
-  getRequestLogOptions: vi.fn().mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] }),
 }));
 
 vi.mock("@/features/reports/hooks/use-reports", () => ({
@@ -105,7 +100,6 @@ const useReportsOptionsMock = vi.mocked(useReportsOptions);
 const useReportsMock = vi.mocked(useReports);
 const useThreadIdentityMock = vi.mocked(useThreadIdentity);
 const listAccountsMock = vi.mocked(listAccounts);
-const getRequestLogOptionsMock = vi.mocked(getRequestLogOptions);
 const getBrowserReportsTimeZoneMock = vi.mocked(getBrowserReportsTimeZone);
 type UseReportsMockResult = ReturnType<typeof useReports>;
 const REPORTS_TIMEZONE_STORAGE_KEY = "codex-lb-reports-timezone";
@@ -141,11 +135,9 @@ describe("ReportsPage", () => {
     } as unknown as ReturnType<typeof useThreadIdentity>);
     useReportsOptionsMock.mockReturnValue({ data: { models: ["gpt-5.1", "gpt-5.2"], useragents: ["CLI", "SDK"] }, isLoading: false, refetch: vi.fn() } as unknown as ReturnType<typeof useReportsOptions>);
     listAccountsMock.mockReset();
-    getRequestLogOptionsMock.mockReset();
     getBrowserReportsTimeZoneMock.mockReset();
     window.localStorage.clear();
     listAccountsMock.mockResolvedValue({ accounts: [] });
-    getRequestLogOptionsMock.mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
     getBrowserReportsTimeZoneMock.mockReturnValue("America/Los_Angeles");
   });
 
@@ -863,7 +855,7 @@ describe("ReportsPage", () => {
     );
   });
 
-  it("shows API key option load failures with a retry button and recovers when retried", async () => {
+  it("selects historical API keys from report options including deleted IDs", async () => {
     const user = userEvent.setup();
     useReportsMock.mockImplementation(() =>
       asUseReportsResult({
@@ -873,61 +865,26 @@ describe("ReportsPage", () => {
         refetch: vi.fn(),
       }),
     );
-    getRequestLogOptionsMock
-      .mockRejectedValueOnce(new Error("api keys backend timeout"))
-      .mockResolvedValueOnce({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
-
-    renderWithProviders(<ReportsPage />);
-
-    const apiKeyErrorText = await screen.findByText(
-      /Failed to load API key options: api keys backend timeout/i,
-    );
-    expect(apiKeyErrorText).toBeInTheDocument();
-    expect(
-      screen
-        .getAllByRole("button", { name: /api keys/i })
-        .find((button) => button.getAttribute("aria-haspopup") === "menu"),
-    ).toBeInTheDocument();
-
-    const apiKeyErrorContainer = apiKeyErrorText.parentElement!.parentElement!;
-    const retryButton = within(apiKeyErrorContainer).getByRole("button", { name: /retry/i });
-    await user.click(retryButton);
-
-    expect(getRequestLogOptionsMock).toHaveBeenCalledTimes(2);
-    await waitFor(() => {
-      expect(
-        screen.queryByText(/Failed to load API key options:/i),
-      ).not.toBeInTheDocument();
-    });
-  });
-
-  it("populates API key options from request log options including deleted keys with ID fallback", async () => {
-    const user = userEvent.setup();
-    useReportsMock.mockImplementation(() =>
-      asUseReportsResult({
-        data: EMPTY_REPORT,
-        isLoading: false,
-        isError: false,
-        refetch: vi.fn(),
-      }),
-    );
-    getRequestLogOptionsMock.mockResolvedValue({
-      accountIds: [],
-      apiKeys: [
+    useReportsOptionsMock.mockReturnValue({
+      data: { models: [], useragents: [], apiKeys: [
         { id: "key_active", name: "Active Key", keyPrefix: "sk-active" },
         { id: "key_deleted", name: "key_deleted", keyPrefix: null },
       ],
-      modelOptions: [],
-      statuses: [],
-    });
+      },
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useReportsOptions>);
 
     renderWithProviders(<ReportsPage />);
 
     const trigger = await screen.findByRole("button", { name: /api keys/i });
     await user.click(trigger);
 
-    expect(await screen.findByText(/Active Key/i)).toBeInTheDocument();
-    expect(await screen.findByText("key_deleted")).toBeInTheDocument();
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: "key_deleted" }));
+    await waitFor(() => expect(useReportsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ apiKeyId: ["key_deleted"] }),
+      "America/Los_Angeles",
+    ));
   });
 
   it("exports CSV based on the filtered report dataset when API key filter is active", async () => {

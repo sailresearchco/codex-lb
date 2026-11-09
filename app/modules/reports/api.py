@@ -5,6 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
@@ -87,6 +88,7 @@ async def get_thread_identity(
 
 @router.get("/options", response_model=ReportsOptionsResponse)
 async def get_report_options(
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: ReportsContext = Depends(get_reports_context),
     caches: ReportsCaches = Depends(get_reports_caches),
     start_date: Annotated[date | None, Query()] = None,
@@ -97,7 +99,7 @@ async def get_report_options(
 ) -> ReportsOptionsResponse:
     try:
         key = _cache_key(start_date, end_date, report_timezone, account_id, api_key_id)
-        return await caches.options.get(
+        options = await caches.options.get(
             key,
             lambda: context.service.get_options(
                 start_date=key.start,
@@ -107,6 +109,13 @@ async def get_report_options(
                 api_key_ids=list(key.api_keys) or None,
             ),
         )
+        # Keep privileged inventory out of the shared report-options cache.
+        api_keys = (
+            await context.service.get_api_key_options(key.start, key.end, key.timezone)
+            if principal.has(Permission.API_KEYS_READ)
+            else []
+        )
+        return options.model_copy(update={"api_keys": api_keys})
     except InvalidReportDateRangeError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_report_date_range") from exc
     except DailyReportRangeTooLargeError as exc:

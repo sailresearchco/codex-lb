@@ -9,10 +9,11 @@ import {
   type RequestLogsListFilters,
 } from "@/features/dashboard/api";
 import { FilterStateSchema, type FilterState } from "@/features/dashboard/schemas";
+import { isRequestLogRangeValid, requestLogTimestamp } from "@/features/dashboard/request-log-window";
 
 const DEFAULT_FILTER_STATE: FilterState = {
   search: "",
-  timeframe: "all",
+  timeframe: "24h",
   accountIds: [],
   apiKeyIds: [],
   modelOptions: [],
@@ -37,6 +38,8 @@ export function requestLogFiltersApplied(filters: FilterState): boolean {
 const REQUEST_LOG_PARAM_KEYS = [
   "search",
   "timeframe",
+  "since",
+  "until",
   "accountId",
   "apiKeyId",
   "modelOption",
@@ -57,7 +60,11 @@ function parseNumber(value: string | null, fallback: number): number {
 function parseFilterState(params: URLSearchParams): FilterState {
   const candidate = {
     search: params.get("search") ?? "",
-    timeframe: params.get("timeframe") ?? "all",
+    timeframe: params.has("since") || params.has("until")
+      ? "custom"
+      : params.get("timeframe") === "all" ? "24h" : params.get("timeframe") ?? "24h",
+    since: params.get("since") ?? undefined,
+    until: params.get("until") ?? undefined,
     accountIds: params.getAll("accountId"),
     apiKeyIds: params.getAll("apiKeyId"),
     modelOptions: params.getAll("modelOption"),
@@ -81,7 +88,11 @@ function writeFilterState(state: FilterState, base?: URLSearchParams): URLSearch
   if (state.search) {
     params.set("search", state.search);
   }
-  if (state.timeframe !== "all") {
+  if (state.timeframe === "custom") {
+    params.set("timeframe", "custom");
+    if (state.since) params.set("since", state.since);
+    if (state.until) params.set("until", state.until);
+  } else if (state.timeframe !== DEFAULT_FILTER_STATE.timeframe) {
     params.set("timeframe", state.timeframe);
   }
   for (const value of state.accountIds) {
@@ -127,13 +138,14 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     }
     return { ...parsed, apiKeyIds: [] };
   }, [allowApiKeyFilters, searchParams]);
+  const hasLegacyTimeframe = searchParams.get("timeframe") === "all";
   const hasHiddenApiKeyParams = !allowApiKeyFilters && searchParams.has("apiKeyId");
   useEffect(() => {
-    if (!hasHiddenApiKeyParams) {
+    if (!hasHiddenApiKeyParams && !hasLegacyTimeframe) {
       return;
     }
     setSearchParams(writeFilterState(filters, searchParams), { replace: true });
-  }, [filters, hasHiddenApiKeyParams, searchParams, setSearchParams]);
+  }, [filters, hasHiddenApiKeyParams, hasLegacyTimeframe, searchParams, setSearchParams]);
   // Change the query key immediately to retire the previous read, then admit
   // the new search only after typing settles, including a return to older text.
   const [searchAdmission, setSearchAdmission] = useState({ search: filters.search, settled: true });
@@ -147,7 +159,10 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
   }, [searchAdmission]);
 
   const filtersApplied = requestLogFiltersApplied(filters);
-  const timeframe = filters.timeframe === "all" ? undefined : filters.timeframe;
+  const rangeValid = filters.timeframe !== "custom" || isRequestLogRangeValid(filters.since, filters.until);
+  const timeframe = filters.timeframe === "custom" ? undefined : filters.timeframe;
+  const since = filters.timeframe === "custom" ? requestLogTimestamp(filters.since) : undefined;
+  const until = filters.timeframe === "custom" ? requestLogTimestamp(filters.until) : undefined;
   const listFilters = useMemo<RequestLogsListFilters>(
     () => ({
       search: filters.search || undefined,
@@ -158,18 +173,22 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
       statuses: filters.statuses,
       modelOptions: filters.modelOptions,
       timeframe,
+      since,
+      until,
       conversationId: filters.conversationId ?? undefined,
     }),
-    [filters, timeframe],
+    [filters, timeframe, since, until],
   );
   const facetFilters = useMemo<RequestLogFacetFilters>(
     () => ({
       timeframe,
+      since,
+      until,
       accountIds: filters.accountIds,
       apiKeyIds: filters.apiKeyIds,
       modelOptions: filters.modelOptions,
     }),
-    [filters.accountIds, filters.apiKeyIds, filters.modelOptions, timeframe],
+    [filters.accountIds, filters.apiKeyIds, filters.modelOptions, timeframe, since, until],
   );
 
   const {
@@ -187,7 +206,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
       page: await getRequestLogs(listFilters, signal),
       filtersApplied,
     }),
-    enabled: enabled && searchAdmission.search === filters.search && searchAdmission.settled,
+    enabled: enabled && rangeValid && searchAdmission.search === filters.search && searchAdmission.settled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
@@ -218,7 +237,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
   } = useQuery({
     queryKey: ["dashboard", "request-log-options", facetFilters],
     queryFn: ({ signal }) => getRequestLogOptions(facetFilters, signal),
-    enabled,
+    enabled: enabled && rangeValid,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
@@ -237,12 +256,14 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     const nextState: FilterState = {
       ...filters,
       ...patch,
+      ...(patch.timeframe && patch.timeframe !== "custom" ? { since: undefined, until: undefined } : {}),
     };
     setSearchParams(writeFilterState(nextState, searchParams));
   };
 
   return {
     filters,
+    rangeValid,
     listFilters,
     facetFilters,
     emptyStateFiltersApplied,

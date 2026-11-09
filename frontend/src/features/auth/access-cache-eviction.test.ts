@@ -88,4 +88,28 @@ describe("installAccessCacheEviction", () => {
 
     expect(client.getQueryData(["settings", "upstream-proxy"])).toEqual({ endpoints: [] });
   });
+
+  it("evicts report key catalogs when key access changes or the account changes", () => {
+    const previous = useAuthStore.getState();
+    const client = new QueryClient();
+    useAuthStore.setState({ permissions: ["read", "api_keys:read:all"], user: null });
+    const unsubscribe = installAccessCacheEviction(client);
+    const key = ["reports-options", { startDate: "2020-01-01" }];
+    const seedOptions = () => client.setQueryData(key, { apiKeys: [{ id: "private-key" }] });
+    try {
+      seedOptions();
+      useAuthStore.setState({ permissions: ["read", "api_keys:read:own"] });
+      expect(client.getQueryData(key)).toBeUndefined();
+      seedOptions();
+      useAuthStore.setState({ permissions: ["read"] });
+      expect(client.getQueryData(key)).toBeUndefined();
+      seedOptions();
+      useAuthStore.setState({ user: { id: "other-user", username: "other", displayName: null, role: { id: "viewer", slug: "viewer", name: "Viewer", kind: "preset" } } });
+      expect(client.getQueryData(key)).toBeUndefined();
+    } finally {
+      unsubscribe();
+      client.clear();
+      useAuthStore.setState(previous);
+    }
+  });
 });

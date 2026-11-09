@@ -8,7 +8,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const TIMEFRAME_VALUES = ["all", "1h", "24h", "7d"] as const;
+const TIMEFRAME_VALUES = ["1h", "24h", "7d", "custom"] as const;
 export type TimeframeValue = (typeof TIMEFRAME_VALUES)[number];
 
 function isTimeframeValue(value: string): value is TimeframeValue {
@@ -29,10 +29,10 @@ export function TimeframeSelect({ value, onChange }: TimeframeSelectProps) {
         <SelectValue placeholder={t("dashboard.filters.timeframe")} />
       </SelectTrigger>
       <SelectContent align="start">
-        <SelectItem value="all">{t("common.time.all")}</SelectItem>
         <SelectItem value="1h">1h</SelectItem>
         <SelectItem value="24h">24h</SelectItem>
         <SelectItem value="7d">7d</SelectItem>
+        <SelectItem value="custom">{t("dashboard.filters.customRange")}</SelectItem>
       </SelectContent>
     </Select>
   );

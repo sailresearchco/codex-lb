@@ -4277,3 +4277,18 @@ Accounts list, account trends, and dashboard projections failures MUST expose an
 - **WHEN** the operator retries projections
 - **THEN** only the projections query is refetched
 - **AND** the overview stays available
+
+### Requirement: Bounded request-log browsing preserves historical access
+
+Request logs SHALL default and reset to the last 24 hours, with 1h, 24h, 7d and Custom choices. Custom controls SHALL name UTC explicitly and preserve start/end bounds in the URL. Valid custom ranges of at most seven days SHALL be available regardless of age. Invalid or incomplete custom ranges SHALL stop list and options requests and leave the controls usable, including before any list response. Legacy All bookmarks SHALL resolve to 24h. Filter changes SHALL preserve independent dashboard overview parameters, reset pagination where applicable, and pass identical time bounds to list and facet requests. Existing search debounce and cancellation SHALL remain effective.
+
+#### Scenario: Repair an invalid historical bookmark
+- **GIVEN** a custom log URL has a reversed or oversized range and no cached log page
+- **WHEN** the dashboard opens
+- **THEN** the date controls SHALL remain usable without issuing log or facet requests
+- **WHEN** the user repairs the range
+- **THEN** list and options SHALL load the selected historical window without refetching the overview
+
+#### Scenario: Reset historical filters
+- **WHEN** the user resets a custom request-log range
+- **THEN** the URL SHALL clear the historical bounds and the list and options SHALL request the last 24 hours

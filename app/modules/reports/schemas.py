@@ -72,9 +72,16 @@ class ReportComparison(DashboardModel):
     previous: ReportComparisonPrevious
 
 
+class ReportApiKeyOption(DashboardModel):
+    id: str
+    name: str
+    key_prefix: str | None = None
+
+
 class ReportsOptionsResponse(DashboardModel):
     models: list[str]
     useragents: list[str]
+    api_keys: list[ReportApiKeyOption] = Field(default_factory=list)
 
 
 class ReportsResponse(DashboardModel):

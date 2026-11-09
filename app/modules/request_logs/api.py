@@ -44,6 +44,8 @@ conversations_router = APIRouter(
 
 _MODEL_OPTION_DELIMITER = ":::"
 _CONVERSATION_MAX_LOOKBACK = timedelta(days=30)
+_REQUEST_LOG_MAX_WINDOW = timedelta(days=7)
+_REQUEST_LOG_DEFAULT_WINDOW = timedelta(hours=24)
 
 
 def _parse_model_option(value: str) -> ServiceRequestLogModelOption | None:
@@ -60,15 +62,36 @@ def _parse_model_option(value: str) -> ServiceRequestLogModelOption | None:
     return ServiceRequestLogModelOption(model=model, reasoning_effort=effort or None)
 
 
-def _resolve_request_log_since(
+def _resolve_request_log_window(
     timeframe: str | None,
     since: datetime | None,
-) -> tuple[datetime | None, str | None]:
+    until: datetime | None,
+) -> tuple[datetime, datetime, str | None]:
     if timeframe is not None and since is not None:
         raise HTTPException(status_code=422, detail="timeframe and since cannot be supplied together")
-    if timeframe is None:
-        return since, None
-    return resolve_request_log_timeframe(timeframe), timeframe
+    try:
+        effective_until = to_utc_naive(until) if until is not None else utcnow()
+        normalized_since = to_utc_naive(since) if since is not None else None
+    except OverflowError as exc:
+        raise HTTPException(status_code=422, detail="request-log date range is outside the supported dates") from exc
+    cache_timeframe = timeframe
+    if timeframe is not None:
+        effective_since = resolve_request_log_timeframe(timeframe)
+    elif normalized_since is not None:
+        effective_since = normalized_since
+    elif until is not None:
+        try:
+            effective_since = effective_until - _REQUEST_LOG_DEFAULT_WINDOW
+        except OverflowError as exc:
+            raise HTTPException(status_code=422, detail="until is outside the supported date range") from exc
+    else:
+        effective_since = effective_until - _REQUEST_LOG_DEFAULT_WINDOW
+        cache_timeframe = "24h"
+    if effective_since > effective_until:
+        raise HTTPException(status_code=422, detail="since must be on or before until")
+    if effective_until - effective_since > _REQUEST_LOG_MAX_WINDOW:
+        raise HTTPException(status_code=422, detail="request-log date range must be 7 days or less")
+    return effective_since, effective_until, cache_timeframe
 
 
 @router.get("", response_model=RequestLogsResponse)
@@ -96,14 +119,14 @@ async def list_request_logs(
     if model_option:
         parsed = [_parse_model_option(value) for value in model_option]
         parsed_options = [value for value in parsed if value is not None] or None
-    effective_since, cache_timeframe = _resolve_request_log_since(timeframe, since)
+    effective_since, effective_until, cache_timeframe = _resolve_request_log_window(timeframe, since, until)
     page = await context.service.list_recent(
         limit=limit,
         offset=offset,
         search=search,
         conversation_id=conversation_id,
         since=effective_since,
-        until=until,
+        until=effective_until,
         account_ids=account_id,
         api_key_ids=api_key_id,
         model_options=parsed_options,
@@ -112,6 +135,7 @@ async def list_request_logs(
         status=status,
         cache_mode="timeframe" if cache_timeframe is not None else "since",
         timeframe=cache_timeframe,
+        until_is_now=until is None,
         include_sensitive_metadata=principal.has(Permission.CONVERSATIONS_READ),
         include_account_identity=principal.has(Permission.ACCOUNTS_WRITE),
         include_api_key_identity=principal.has(Permission.API_KEYS_READ),
@@ -143,10 +167,10 @@ async def list_request_log_filter_options(
     if model_option:
         parsed = [_parse_model_option(value) for value in model_option]
         parsed_options = [value for value in parsed if value is not None] or None
-    effective_since, _ = _resolve_request_log_since(timeframe, since)
+    effective_since, effective_until, _ = _resolve_request_log_window(timeframe, since, until)
     options = await context.service.list_filter_options(
         since=effective_since,
-        until=until,
+        until=effective_until,
         account_ids=account_id,
         api_key_ids=api_key_id,
         model_options=parsed_options,

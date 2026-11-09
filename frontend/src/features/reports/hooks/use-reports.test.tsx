@@ -1,12 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { get } from "@/lib/api-client";
-import { useReports } from "./use-reports";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { useReports, useReportsOptions } from "./use-reports";
 
 vi.mock("@/lib/api-client", () => ({
+  setUnauthorizedHandler: vi.fn(),
   get: vi.fn().mockResolvedValue({
     summary: {
       totalCostUsd: 0,
@@ -340,4 +342,32 @@ it("caches reports without periodic polling or automatic retries", async () => {
   expect(options.retry).toBe(false);
   unmount();
   client.clear();
+});
+
+it("separates report options by key access and redacts cached key metadata after a downgrade", async () => {
+  const previous = useAuthStore.getState();
+  const client = createTestQueryClient();
+  const apiKeys = [{ id: "private-key", name: "Private key", keyPrefix: "sk-private" }];
+  getMock.mockClear();
+  getMock.mockResolvedValue({ models: ["model"], useragents: [], apiKeys });
+  useAuthStore.setState({ permissions: ["read", "api_keys:read:all"], user: null });
+  const filters = { startDate: "2020-01-01", endDate: "2020-01-07", accountId: [], model: "" };
+  const { result, unmount } = renderHook(() => useReportsOptions(filters, "UTC"), { wrapper: createWrapper(client) });
+  try {
+    await waitFor(() => expect(result.current.data?.apiKeys).toEqual(apiKeys));
+    await act(async () => useAuthStore.setState({ permissions: ["read"] }));
+    expect(result.current.data?.apiKeys ?? []).toEqual([]);
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.apiKeys).toEqual([]);
+    expect(result.current.data?.models).toEqual(["model"]);
+    await act(async () => useAuthStore.setState({ permissions: ["read", "api_keys:read:own"] }));
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(3));
+    await act(async () => useAuthStore.setState({ user: { id: "another-user", username: "other", displayName: null, role: { id: "viewer", slug: "viewer", name: "Viewer", kind: "preset" } } }));
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(4));
+  } finally {
+    unmount();
+    client.clear();
+    useAuthStore.setState(previous);
+  }
 });

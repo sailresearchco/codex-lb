@@ -325,35 +325,22 @@ Additional usage latest-per-account reads on SQLite MUST avoid `row_number()` wi
 - **THEN** the repository returns the same latest row per account as the set-based query
 - **AND** the SQLite path does not emit a `row_number()` window-function query
 
-### Requirement: Unfiltered request-log filter options avoid full DISTINCT passes
+### Requirement: Request-log filter options share the bounded browsing window
 
-When `GET /api/request-logs/options` is requested without user-supplied filters, each facet MUST traverse ordered distinct values with index probes rather than repeatedly scan the live request-log cohort or perform a full `DISTINCT` pass. A candidate value MUST be returned only when a row satisfies the endpoint's visibility and status predicates. Returned option sets, ordering, NULL handling, and soft-delete/status-facet semantics MUST match the unbounded `DISTINCT` results.
+`GET /api/request-logs/options` MUST apply the same finite time-window resolution as the log listing, including the default last 24 hours. Facets MUST preserve ordering, NULL handling, soft-delete and status predicates, and API-key facet expansion without reading outside the resolved time window.
 
-#### Scenario: Unfiltered facets return identical option sets via bounded probes
+#### Scenario: Default facets exclude older history
 
-- **GIVEN** request logs spanning multiple accounts, models with and without reasoning effort, API keys, and statuses with and without error codes
-- **WHEN** the options endpoint is called with no filters
-- **THEN** each facet MUST advance through indexed distinct values rather than a full `DISTINCT` pass
-- **AND** the response MUST equal the legacy `DISTINCT` results, including `(value, NULL)` pairs and ordering
+- **GIVEN** request-log values exist both inside and outside the last 24 hours
+- **WHEN** listing and options are called without time parameters
+- **THEN** both responses MUST describe only the last 24 hours
+- **AND** options MUST exclude values found only outside that window
 
-#### Scenario: SQLite facet traversal does not require planner statistics
+#### Scenario: Historical facets match an explicit range
 
-- **GIVEN** SQLite request logs with many repeated visible rows, the standard facet indexes, and no planner statistics
-- **WHEN** the unfiltered options endpoint is called
-- **THEN** facet traversal MUST use the facet's ordered values and equality-constrained eligibility checks
-- **AND** adding duplicate visible rows MUST NOT cause each recursive step to rescan the entire live-row cohort
-
-#### Scenario: Soft-deleted rows stay excluded from skip-scanned facets
-
-- **GIVEN** request-log values present only in rows with `deleted_at` set or an unsupported status
-- **WHEN** the options endpoint is called without filters
-- **THEN** those values MUST NOT be returned
-- **AND** a value shared by visible and invisible rows MUST be returned exactly once when a visible row qualifies
-
-#### Scenario: Filtered requests keep bounded DISTINCT semantics
-
-- **WHEN** the options endpoint receives user filters such as time bounds, account, API-key, model, or reasoning-effort constraints
-- **THEN** the facets MUST apply those filters with unchanged semantics and results
+- **WHEN** the options endpoint receives a valid historical range of at most seven days
+- **THEN** facets MUST include eligible values within that range regardless of its age
+- **AND** account, model, status and API-key facet expansion semantics MUST remain intact
 
 ### Requirement: Proxy API-key auth caching is invalidation-driven with a TTL backstop
 
@@ -1025,8 +1012,7 @@ single-session ownership constraint.
 `GET /api/request-logs` and `/api/request-logs/options` MUST accept
 `timeframe=1h|24h|7d` and derive each effective lower bound from the server UTC
 clock. Symbolic requests MUST NOT require a browser timestamp. `timeframe` and
-`since` MUST NOT be supplied together. Existing standalone `since` and `until`
-MUST retain behavior; `until` MAY accompany a timeframe.
+`since` MUST NOT be supplied together. Every list and options query MUST have finite UTC lower and upper bounds spanning at most seven days. Omitted bounds MUST select the last 24 hours. A standalone `since` MUST end at server now; a standalone `until` MUST start 24 hours earlier. Explicit `since` and `until` MAY select any retained historical period. `until` MAY accompany a timeframe. Offset-aware timestamps MUST normalize to UTC; naive timestamps remain UTC. The upper bound remains inclusive. Reversed or oversized windows MUST return HTTP 422 before querying logs. These bounds MUST NOT delete history or change exact total, pagination, search, or conversation-summary semantics within the selected window.
 
 #### Scenario: Symbolic timeframe advances on refresh
 
@@ -1042,8 +1028,7 @@ MUST retain behavior; `until` MAY accompany a timeframe.
 ### Requirement: Request-log total cache uses semantic window identity
 
 In symbolic mode, total-cache identity MUST use `("timeframe", timeframe)`.
-Legacy mode MUST use `("since", effective_since)`. Membership rows MUST always
-use the live derived timestamp.
+Explicit-start mode MUST use `("since", effective_since)`. A server-resolved rolling upper bound MUST NOT fragment the count cache; caller-supplied upper bounds MUST remain distinct cache identities. Membership rows MUST always use the live derived lower and upper timestamps.
 
 #### Scenario: Repeated timeframe requests reuse count metadata
 
