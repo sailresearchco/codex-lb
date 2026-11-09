@@ -296,7 +296,8 @@ configured header rather than producing a null conversation ID.
 ### Requirement: Conversation metadata is nullable and indexed in request logs
 
 The request-log persistence model MUST store `conversation_id` as a nullable
-string and MUST provide an index named `idx_logs_conversation_id`. Existing rows
+string and MUST provide an index named `idx_logs_conversation_deleted` on
+`(conversation_id, deleted_at)`. Existing rows
 MUST remain valid with a null conversation ID. Empty or whitespace-only detected
 values MUST be persisted as null.
 
