@@ -137,7 +137,9 @@ async def test_backfill_preserves_folded_history_filters_and_idempotency(async_c
         )
         for table, count in before_counts.items():
             assert await session.scalar(select(func.sum(table.request_count))) == count
-    response = await async_client.get("/api/request-logs?limit=100")
+    response = await async_client.get(
+        "/api/request-logs", params={"limit": 100, "since": BASE.isoformat(), "until": NOW.isoformat()}
+    )
     assert response.status_code == 200
     rows = response.json()["requests"]
     astra = next(row for row in rows if row["requestId"] == "r0")

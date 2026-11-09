@@ -318,15 +318,16 @@ async def test_guest_request_log_search_does_not_match_account_email(
         await session.commit()
 
     _use_principal(app_instance, monkeypatch, admin_principal(auth_mode=DashboardAuthMode.STANDARD))
-    admin_hits = await async_client.get("/api/request-logs", params={"search": "alice.smith"})
+    window = {"since": "2026-09-01T00:00:00Z", "until": "2026-09-02T00:00:00Z"}
+    admin_hits = await async_client.get("/api/request-logs", params={**window, "search": "alice.smith"})
     assert admin_hits.status_code == 200
     assert admin_hits.json()["total"] == 1
 
     _use_principal(app_instance, monkeypatch, guest_principal())
-    guest_hits = await async_client.get("/api/request-logs", params={"search": "alice.smith"})
+    guest_hits = await async_client.get("/api/request-logs", params={**window, "search": "alice.smith"})
     assert guest_hits.status_code == 200
     assert guest_hits.json()["total"] == 0
-    guest_by_request_id = await async_client.get("/api/request-logs", params={"search": "req-email-oracle"})
+    guest_by_request_id = await async_client.get("/api/request-logs", params={**window, "search": "req-email-oracle"})
     assert guest_by_request_id.json()["total"] == 1
 
 
@@ -415,11 +416,12 @@ async def test_request_log_count_cache_is_keyed_by_identity_visibility(
     monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
     logs_repository_module._clear_recent_count_cache()
 
+    params = {"since": "2026-09-01T00:00:00Z", "until": "2026-09-02T00:00:00Z", "search": "alice.smith"}
     _use_principal(app_instance, monkeypatch, admin_principal(auth_mode=DashboardAuthMode.STANDARD))
-    assert (await async_client.get("/api/request-logs", params={"search": "alice.smith"})).json()["total"] == 1
+    assert (await async_client.get("/api/request-logs", params=params)).json()["total"] == 1
 
     _use_principal(app_instance, monkeypatch, guest_principal())
-    assert (await async_client.get("/api/request-logs", params={"search": "alice.smith"})).json()["total"] == 0
+    assert (await async_client.get("/api/request-logs", params=params)).json()["total"] == 0
 
 
 @pytest.mark.asyncio

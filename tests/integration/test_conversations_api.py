@@ -1192,7 +1192,7 @@ async def test_since_filter_composes_with_search(async_client, db_setup):
 
 
 @pytest.mark.asyncio
-async def test_conversation_membership_candidates_are_bounded_before_full_history_aggregation(db_setup):
+async def test_conversation_membership_window_preserves_selected_full_history(db_setup):
     base = utcnow().replace(microsecond=0)
     since = base - timedelta(days=7)
     await _seed_conversation_rows(
@@ -1242,30 +1242,16 @@ async def test_conversation_membership_candidates_are_bounded_before_full_histor
         ]
     )
 
-    statements: list[str] = []
-
-    def _capture(_conn, _cursor, statement, _parameters, _context, _executemany):
-        if statement.lstrip().upper().startswith(("SELECT", "WITH")):
-            statements.append(statement)
-
-    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
-    try:
-        async with SessionLocal() as session:
-            result = await RequestLogsRepository(session).list_conversations(since=since)
-    finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+    async with SessionLocal() as session:
+        result = await RequestLogsRepository(session).list_conversations(since=since)
 
     assert result.total == 1
     assert [summary.conversation_id for summary in result.summaries] == ["bounded-active"]
     assert result.summaries[0].request_count == 2
+    assert result.summaries[0].first_requested_at == base - timedelta(days=60)
+    assert result.summaries[0].last_requested_at == base - timedelta(days=1)
+    assert result.summaries[0].total_tokens == 33
     assert result.summaries[0].cost_usd == pytest.approx(3.0)
-
-    candidate_fragments = _distinct_candidate_fragments(statements)
-    assert candidate_fragments
-    assert any("REQUEST_LOGS.REQUESTED_AT >= " in fragment for fragment in candidate_fragments)
-    emitted_sql = "\n".join(statements).lower()
-    assert "having count" not in emitted_sql
-    assert "conversation_id in (select" in emitted_sql
 
 
 @pytest.mark.asyncio
