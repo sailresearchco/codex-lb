@@ -55,8 +55,9 @@ Selector and dashboard hot-path reads MUST avoid unbounded SQL window-ranking ov
 
 #### Scenario: Unfiltered distinct label listing avoids a full history pass
 - **GIVEN** additional-usage history holds many rows spread over a small set of distinct `(quota_key, limit_name, metered_feature)` labels
-- **WHEN** the distinct label listing is requested on PostgreSQL without a recency bound
+- **WHEN** the distinct label listing is requested on SQLite or PostgreSQL without a recency bound
 - **THEN** the read MUST iterate distinct `(account_id, quota_key, limit_name, metered_feature)` tuples via ordered index probes instead of scanning every history row
+- **AND** SQLite SHALL pin each account and traverse the label columns using equality on each known prefix and a strict scalar range on the next column so repeated labels within that account are skipped by the index
 - **AND** the canonicalized result set MUST equal the plain `DISTINCT` read
 
 #### Scenario: Hot-path indexes are idempotent

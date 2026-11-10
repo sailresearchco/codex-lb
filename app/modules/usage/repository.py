@@ -1765,9 +1765,10 @@ class AdditionalUsageRepository:
         account_ids: Collection[str] | None = None,
         since: datetime | None = None,
     ) -> list[str]:
-        bind = self._session.get_bind()
-        dialect = bind.dialect.name if bind else "sqlite"
-        if dialect == "postgresql" and since is None:
+        dialect = self._session.get_bind().dialect.name
+        if since is None and dialect == "sqlite":
+            label_rows = await self._distinct_label_tuples_sqlite(account_ids=account_ids)
+        elif since is None and dialect == "postgresql":
             label_rows = await self._distinct_label_tuples_postgres(account_ids=account_ids)
         else:
             stmt = select(
@@ -1794,6 +1795,54 @@ class AdditionalUsageRepository:
             is not None
         }
         return sorted(resolved_keys)
+
+    async def _distinct_label_tuples_sqlite(
+        self, *, account_ids: Collection[str] | None = None
+    ) -> list[tuple[str, str, str]]:
+        # SQLite's row-value > cursor starts at the equal boundary and walks
+        # duplicate tuples even with the covering index. Each scalar > probe
+        # below skips duplicates at that index depth; all columns are NOT NULL.
+        columns = (
+            AdditionalUsageHistory.quota_key,
+            AdditionalUsageHistory.limit_name,
+            AdditionalUsageHistory.metered_feature,
+        )
+        accounts = iter(sorted(set(account_ids))) if account_ids is not None else None
+        account_cursor: str | None = None
+        labels: set[tuple[str, str, str]] = set()
+
+        async def collect(account_id: str, prefix: tuple[str, ...] = ()) -> None:
+            column = columns[len(prefix)]
+            cursor: str | None = None
+            while True:
+                stmt = select(column).where(AdditionalUsageHistory.account_id == account_id)
+                for previous_column, value in zip(columns, prefix):
+                    stmt = stmt.where(previous_column == value)
+                if cursor is not None:
+                    stmt = stmt.where(column > cursor)
+                value = await self._session.scalar(stmt.order_by(column).limit(1))
+                if value is None:
+                    return
+                cursor = value
+                if len(prefix) == 2:
+                    labels.add((prefix[0], prefix[1], value))
+                else:
+                    await collect(account_id, (*prefix, value))
+
+        while True:
+            if accounts is not None:
+                account_id = next(accounts, None)
+            else:
+                account_stmt = select(AdditionalUsageHistory.account_id)
+                if account_cursor is not None:
+                    account_stmt = account_stmt.where(AdditionalUsageHistory.account_id > account_cursor)
+                account_id = await self._session.scalar(
+                    account_stmt.order_by(AdditionalUsageHistory.account_id).limit(1)
+                )
+            if account_id is None:
+                return sorted(labels)
+            account_cursor = account_id
+            await collect(account_id)
 
     async def _distinct_label_tuples_postgres(
         self,
