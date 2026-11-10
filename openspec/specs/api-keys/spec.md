@@ -811,6 +811,20 @@ When `pooled_capacity_credits_primary` is 0.0 (e.g., all assigned accounts are f
 
 The system MUST aggregate `accountCosts[]` from request-log rows whose `api_key_id` matches the selected key and whose `requested_at` falls inside the rolling 7-day window used by the endpoint totals.
 
+Whole hours below the hourly usage watermark SHALL be served from the existing hourly usage rollups. The exact partial-hour edges and unfolded tail SHALL be read from raw request logs using indexed API-key/time ranges. Folded usage, its watermark, raw contributions, and current account metadata SHALL be read in one statement snapshot. The read SHALL aggregate by account and deletion status in SQL before materializing results, preserve output-or-reasoning token fallback and the aggregate cached-token clamp, and exclude warmup requests. Missing or stale rollup state SHALL expand the raw complement only within the requested seven-day window; it SHALL NOT trigger an all-history scan, a synchronous backfill, or truncated totals.
+
+#### Scenario: Fold boundaries preserve rolling usage
+- **GIVEN** a rolling seven-day window includes partial UTC hours, folded history, and an unfolded tail
+- **WHEN** the hourly watermark advances
+- **THEN** usage totals and account cost groups SHALL remain equal to the raw-window result while its edge rows are retained
+- **AND** pruning raw rows covered by complete folded hours SHALL NOT change those totals
+
+#### Scenario: Missing or stale usage rollups remain bounded
+- **GIVEN** the hourly watermark is missing or precedes the requested window
+- **WHEN** seven-day usage is requested
+- **THEN** the raw query SHALL retain both the API-key filter and the exact seven-day time bounds
+- **AND** the existing SQLite query deadline SHALL still apply
+
 #### Scenario: Account costs are sorted by descending cost
 - **WHEN** a client loads `GET /api/api-keys/{key_id}/usage-7d`
 - **AND** multiple grouped account-cost buckets exist in the 7-day window

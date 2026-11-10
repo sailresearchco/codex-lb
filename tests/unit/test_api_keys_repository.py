@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ApiKeyLimit, LimitType, LimitWindow
 from app.modules.api_keys.repository import ApiKeyAccountCost, ApiKeysRepository
@@ -229,7 +230,8 @@ class TestAccountLookupQueries:
 class TestUsage7d:
     @pytest.mark.asyncio
     async def test_returns_totals_and_account_costs_from_single_execute(self) -> None:
-        session = AsyncMock()
+        session = AsyncMock(spec=AsyncSession)
+        session.get_bind.return_value = SimpleNamespace(dialect=postgresql_dialect())
         repo = ApiKeysRepository(session)
         since = datetime(2026, 5, 1, 0, 0, 0)
         until = datetime(2026, 5, 8, 0, 0, 0)
