@@ -9,6 +9,7 @@ from app.core.scheduling.leader_election_handle import get_leader_election as _g
 from app.modules.accounts.usage_rollup import run_fold_pass
 from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
 from app.modules.reports.rollup import run_report_fold_pass
+from app.modules.request_logs.conversation_summary import run_conversation_summary_pass
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +20,17 @@ FOLD_INTERVAL_SECONDS = 900
 class AccountUsageRollupScheduler:
     interval_seconds: int
     _task: asyncio.Task[None] | None = None
+    _summary_task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def start(self) -> None:
         if self._task and not self._task.done():
             return
+        if self._task is not None or self._summary_task is not None:
+            await self.stop()
         self._stop.clear()
+        self._summary_task = asyncio.create_task(self._run_summary_loop())
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self) -> None:
@@ -33,9 +38,32 @@ class AccountUsageRollupScheduler:
             return
         self._stop.set()
         self._task.cancel()
+        if self._summary_task is not None:
+            self._summary_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._summary_task
+            self._summary_task = None
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+
+    async def _run_summary_loop(self) -> None:
+        while not self._stop.is_set():
+            processed = 0
+            try:
+                processed = await _get_leader_election().run_if_leader(self._summary_as_leader) or 0
+            except Exception:
+                logger.exception("Conversation summary backfill failed")
+            try:
+                # Backlog progresses without waiting for the 15-minute usage
+                # fold tick. Each pass and transaction remains bounded.
+                await asyncio.wait_for(self._stop.wait(), timeout=1 if processed else 60)
+            except asyncio.TimeoutError:
+                continue
+
+    async def _summary_as_leader(self) -> int:
+        async with self._lock:
+            return await run_conversation_summary_pass()
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():

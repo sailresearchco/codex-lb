@@ -48,6 +48,10 @@ from app.modules.accounts.usage_time_rollup import (
     mirror_account_hard_delete_into_time_rollups,
     mirror_account_soft_delete_into_time_rollups,
 )
+from app.modules.request_logs.conversation_summary import (
+    rekey_account_facets,
+    remove_account_history,
+)
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 from app.modules.usage.plan_downgrade_observations import discard_plan_downgrade_observations
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
@@ -632,6 +636,11 @@ class AccountsRepository:
         # duplicates' logs to rollup rows this transaction deletes, leaving
         # those logs behind the watermark but counted in no rollup.
         await lock_fold_state(self._session)
+        if self._dialect_name() == "postgresql":
+            await self._session.execute(
+                select(Account.id).where(Account.id.in_(duplicate_ids)).order_by(Account.id).with_for_update()
+            )
+        await rekey_account_facets(self._session, duplicate_ids, canonical.id)
 
         duplicate_api_key_ids = (
             (
@@ -1196,17 +1205,13 @@ class AccountsRepository:
                 await self._session.execute(select(Account.id).where(Account.id == account_id).with_for_update())
             await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
             if delete_history:
-                await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
+                await remove_account_history(self._session, account_id, delete_history=True)
                 # Mirror the raw DELETE into the folded time-axis buckets;
                 # raw below the watermark may already be pruned, so folded
                 # rows can never be recomputed and must be removed directly.
                 await mirror_account_hard_delete_into_time_rollups(self._session, account_id)
             else:
-                await self._session.execute(
-                    update(RequestLog)
-                    .where(RequestLog.account_id == account_id)
-                    .values(account_id=None, deleted_at=utcnow()),
-                )
+                await remove_account_history(self._session, account_id, delete_history=False)
                 # Mirror the retroactive detach (account_id=NULL, deleted_at
                 # set) into the folded buckets: move them to the orphaned
                 # deleted dimension so time-series totals are preserved.

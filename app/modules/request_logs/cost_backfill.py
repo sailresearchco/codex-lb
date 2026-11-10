@@ -21,6 +21,12 @@ from app.db.models import (
 from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_rollup import lock_fold_state
 from app.modules.accounts.usage_time_rollup import CONVERSATION_WHITESPACE, epoch_seconds, to_dimension
+from app.modules.request_logs.conversation_summary import (
+    add_contributions,
+    capture_contributions,
+    contributions_from_logs,
+    subtract_contributions,
+)
 
 _EXCLUDED_KINDS = ("warmup", "limit_warmup")
 
@@ -62,6 +68,7 @@ async def backfill_missing_costs(session: AsyncSession, *, after_id: int = 0, li
                     .with_for_update()
                 )
             ).all()
+            before = await capture_contributions(session, RequestLog.id.in_([log.id for log in logs]))
             updated = 0
             for log in logs:
                 cost = calculated_cost_from_log(cast(RequestLogLike, log))
@@ -70,6 +77,11 @@ async def backfill_missing_costs(session: AsyncSession, *, after_id: int = 0, li
                 await _mirror_cost(session, state, log, cost)
                 log.cost_usd = cost
                 updated += 1
+            await session.flush()
+            await subtract_contributions(session, before)
+            await add_contributions(
+                session, contributions_from_logs([log for log in logs if log.conversation_summary_included])
+            )
             await session.commit()
             return BackfillBatch(len(logs), updated, logs[-1].id if logs else after_id)
         except BaseException:

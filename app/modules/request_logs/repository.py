@@ -33,6 +33,9 @@ from app.db.models import (
     Account,
     AccountUsageRollupState,
     ApiKey,
+    RequestConversationFacet,
+    RequestConversationModelSummary,
+    RequestConversationSummary,
     RequestDemandQuarterRollup,
     RequestKind,
     RequestLog,
@@ -42,6 +45,7 @@ from app.db.models import (
 from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.modules.accounts.usage_rollup import lock_fold_state
 from app.modules.accounts.usage_time_rollup import (
+    DIMENSION_SENTINEL,
     HOURLY_BUCKET_SECONDS,
     WARMUP_REQUEST_KINDS,
     conversation_id_expr,
@@ -57,6 +61,15 @@ from app.modules.accounts.usage_time_rollup_read import (
     read_errors_window,
     read_hourly_window,
     sum_demand_window,
+)
+from app.modules.request_logs.conversation_summary import (
+    add_contributions,
+    capture_contributions,
+    contributions_from_logs,
+    subtract_contributions,
+)
+from app.modules.request_logs.conversation_summary import (
+    require_ready as require_conversation_summaries,
 )
 
 
@@ -276,226 +289,140 @@ class RequestLogsRepository:
         cache_mode: str = "since",
         timeframe: str | None = None,
     ) -> ConversationListResult:
-        conversation_id = RequestLog.conversation_id
-        base_conditions = self._conversation_conditions()
-        search_value = search.strip() if search and search.strip() else None
-        candidate_conditions = [*base_conditions]
+        await require_conversation_summaries(self._session)
+        header = RequestConversationSummary
+        facet = RequestConversationFacet
+        conditions = []
         if since is not None:
-            candidate_conditions.append(RequestLog.requested_at >= since)
+            conditions.append(header.last_requested_at >= since)
+        search_value = search.strip() if search and search.strip() else None
         if search_value is not None:
             pattern = f"%{_escape_like(search_value)}%"
-            candidate_conditions.append(
-                or_(
-                    conversation_id.ilike(pattern, escape="\\"),
-                    RequestLog.useragent_group.ilike(pattern, escape="\\"),
+            matching_agent = select(facet.conversation_id).where(
+                facet.conversation_id == header.conversation_id,
+                facet.kind == "useragent",
+                facet.value.ilike(pattern, escape="\\"),
+            )
+            if since is not None:
+                matching_agent = matching_agent.where(facet.last_requested_at >= since)
+            conditions.append(or_(header.conversation_id.ilike(pattern, escape="\\"), matching_agent.exists()))
+        total = int((await self._session.scalar(select(func.count()).select_from(header).where(*conditions))) or 0)
+        page = list(
+            (
+                await self._session.scalars(
+                    select(header)
+                    .where(*conditions)
+                    .order_by(header.last_requested_at.desc(), header.conversation_id.asc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+            ).all()
+        )
+        page_ids = [row.conversation_id for row in page]
+        facets: dict[str, list[ConversationFacet]] = {"account": [], "api_key": [], "model": []}
+        account_counts: dict[str, int] = {}
+        if page_ids:
+            rows = await self._session.execute(
+                select(facet)
+                .where(
+                    facet.conversation_id.in_(page_ids),
+                    facet.kind.in_(facets),
+                    or_(facet.kind != "api_key", select(ApiKey.id).where(ApiKey.id == facet.value).exists()),
+                )
+                .order_by(
+                    facet.conversation_id,
+                    facet.kind,
+                    facet.request_count.desc(),
+                    facet.last_requested_at.desc(),
+                    facet.value,
                 )
             )
-        # The page itself applies the activity window. Only search needs a
-        # separate qualifying-ID set, since a matching older row can qualify
-        # a conversation whose latest row does not match the search text.
-        if search_value is not None:
-            candidate_ids = (
-                select(conversation_id.label("conversation_id")).where(*candidate_conditions).distinct().subquery()
-            )
-            conditions = [*base_conditions, conversation_id.in_(select(candidate_ids.c.conversation_id))]
-        else:
-            conditions = base_conditions
-
-        count_stmt = select(func.count(func.distinct(conversation_id))).where(*candidate_conditions)
-        ttl_seconds = _COUNT_CACHE_TTL_SECONDS
-        if ttl_seconds <= 0:
-            total = int((await self._session.execute(count_stmt)).scalar_one())
-        else:
-            normalized_search = (search.strip() or None) if search else None
-            if cache_mode == "timeframe":
-                mode_token = ("timeframe", timeframe)
-            else:
-                mode_token = ("since", since)
-            cache_key = ("conversation-count", normalized_search, mode_token)
-            total = _cached_recent_count(cache_key)
-            if total is None:
-                total = int((await self._session.execute(count_stmt)).scalar_one())
-                _store_recent_count(cache_key, total, ttl_seconds)
-
-        # Every candidate has an eligible in-window row, so its latest row is
-        # also in-window. Search qualifies IDs; it must not restrict which row
-        # determines their ordering. Read full history only after pagination.
-        page_conditions = [*conditions]
-        if since is not None:
-            page_conditions.append(RequestLog.requested_at >= since)
-        page = (
-            select(conversation_id.label("conversation_id"))
-            .where(*page_conditions)
-            .group_by(conversation_id)
-            .order_by(func.max(RequestLog.requested_at).desc(), conversation_id.asc())
-            .offset(offset)
-            .limit(limit)
-            .subquery("conversation_page")
-        )
-        output = self._conversation_output_expr()
-        cached = self._conversation_cached_expr()
-        summary_stmt = (
-            select(
-                conversation_id.label("conversation_id"),
-                func.min(RequestLog.requested_at).label("first_requested_at"),
-                func.max(RequestLog.requested_at).label("last_requested_at"),
-                func.count().label("request_count"),
-                func.count(func.distinct(RequestLog.account_id)).label("account_count"),
-                func.coalesce(func.sum(func.coalesce(RequestLog.input_tokens, 0) + output), 0).label("total_tokens"),
-                func.sum(cached).label("cached_input_tokens"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
-            )
-            .where(*base_conditions, conversation_id.in_(select(page.c.conversation_id)))
-            .group_by(conversation_id)
-            .order_by(func.max(RequestLog.requested_at).desc(), conversation_id.asc())
-        )
-        page_rows = (await self._session.execute(summary_stmt)).all()
-        summaries = [
-            ConversationListSummary(
-                conversation_id=row.conversation_id,
-                first_requested_at=row.first_requested_at,
-                last_requested_at=row.last_requested_at,
-                request_count=int(row.request_count),
-                account_count=int(row.account_count),
-                total_tokens=int(row.total_tokens),
-                cached_input_tokens=(int(row.cached_input_tokens) if row.cached_input_tokens is not None else None),
-                cost_usd=float(row.cost_usd or 0.0),
-            )
-            for row in page_rows
-        ]
-
-        page_ids = [summary.conversation_id for summary in summaries]
-        account_facets: list[ConversationFacet] = []
-        api_key_facets: list[ConversationFacet] = []
-        model_facets: list[ConversationFacet] = []
-        if page_ids:
-            # Candidate-ID membership already selected conversations with
-            # activity in the window. Facets must describe the same full
-            # eligible conversation rows as that summary, including history
-            # before `since`.
-            account_facets = await self._conversation_facets(base_conditions, page_ids, RequestLog.account_id)
-            api_key_facets = await self._conversation_facets(base_conditions, page_ids, RequestLog.api_key_id)
-            model_facets = await self._conversation_facets(base_conditions, page_ids, RequestLog.model)
+            for row in rows.scalars():
+                facets[row.kind].append(ConversationFacet(row.conversation_id, row.value, row.request_count))
+                if row.kind == "account":
+                    account_counts[row.conversation_id] = account_counts.get(row.conversation_id, 0) + 1
         return ConversationListResult(
-            summaries=summaries,
-            account_facets=account_facets,
-            api_key_facets=api_key_facets,
-            model_facets=model_facets,
+            summaries=[
+                ConversationListSummary(
+                    conversation_id=row.conversation_id,
+                    first_requested_at=row.first_requested_at,
+                    last_requested_at=row.last_requested_at,
+                    request_count=row.request_count,
+                    account_count=account_counts.get(row.conversation_id, 0),
+                    total_tokens=row.total_tokens,
+                    cached_input_tokens=row.cached_input_tokens if row.cached_known_count else None,
+                    cost_usd=row.cost_usd,
+                )
+                for row in page
+            ],
+            account_facets=facets["account"],
+            api_key_facets=facets["api_key"],
+            model_facets=facets["model"],
             total=total,
         )
-
-    async def _conversation_facets(
-        self,
-        conditions: list[ColumnElement[bool]],
-        page_ids: list[str],
-        value_column: InstrumentedAttribute[str | None] | InstrumentedAttribute[str],
-    ) -> list[ConversationFacet]:
-        conversation_id = RequestLog.conversation_id
-        facet_conditions = [*conditions, conversation_id.in_(page_ids), value_column.is_not(None)]
-        if getattr(value_column, "key", None) == RequestLog.api_key_id.key:
-            # Keep key existence correlated so SQLite reads the page's
-            # conversation rows before probing the key inventory.
-            facet_conditions.append(select(ApiKey.id).where(ApiKey.id == value_column).exists())
-        stmt = (
-            select(
-                conversation_id.label("conversation_id"),
-                value_column.label("value"),
-                func.count().label("request_count"),
-            )
-            .where(*facet_conditions)
-            .group_by(conversation_id, value_column)
-            .order_by(
-                conversation_id.asc(),
-                func.count().desc(),
-                func.max(RequestLog.requested_at).desc(),
-                value_column.asc(),
-            )
-        )
-        rows = (await self._session.execute(stmt)).all()
-        return [
-            ConversationFacet(
-                conversation_id=row.conversation_id,
-                value=row.value,
-                request_count=int(row.request_count),
-            )
-            for row in rows
-        ]
 
     async def get_conversation_details(self, conversation_id: str) -> ConversationDetailsResult | None:
         target = _normalize_conversation_id(conversation_id)
         if not target:
             return None
-        normalized_id = RequestLog.conversation_id
-        conditions = [*self._conversation_conditions(), normalized_id == target]
-        # Details intentionally remain window-agnostic; only list membership uses since.
-        summary = (
-            await self._session.execute(
-                select(
-                    func.min(RequestLog.requested_at).label("started_at"),
-                    func.max(RequestLog.requested_at).label("last_requested_at"),
-                    func.count(func.distinct(RequestLog.account_id)).label("account_count"),
-                    func.coalesce(func.sum(func.coalesce(RequestLog.latency_ms, 0)), 0).label("total_elapsed_ms"),
-                ).where(*conditions)
-            )
-        ).one()
-        if summary.started_at is None:
+        await require_conversation_summaries(self._session)
+        summary = await self._session.get(RequestConversationSummary, target)
+        if summary is None:
             return None
-
-        dominant = (
-            await self._session.execute(
-                select(RequestLog.useragent_group)
-                .where(*conditions, RequestLog.useragent_group.is_not(None))
-                .group_by(RequestLog.useragent_group)
-                .order_by(
-                    func.count().desc(),
-                    func.max(RequestLog.requested_at).desc(),
-                    RequestLog.useragent_group.asc(),
-                )
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-
-        output = self._conversation_output_expr()
-        cached = self._conversation_cached_expr()
-        model_rows = (
-            await self._session.execute(
-                select(
-                    RequestLog.model.label("model"),
-                    RequestLog.reasoning_effort.label("reasoning_effort"),
-                    func.count().label("request_count"),
-                    func.coalesce(func.sum(func.coalesce(RequestLog.latency_ms, 0)), 0).label("total_elapsed_ms"),
-                    func.coalesce(func.sum(func.coalesce(RequestLog.input_tokens, 0)), 0).label("input_tokens"),
-                    func.sum(cached).label("cached_input_tokens"),
-                    func.coalesce(func.sum(output), 0).label("output_tokens"),
-                    func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
-                )
-                .where(*conditions)
-                .group_by(RequestLog.model, RequestLog.reasoning_effort)
-                .order_by(
-                    func.count().desc(),
-                    func.max(RequestLog.requested_at).desc(),
-                    RequestLog.model.asc(),
-                    *self._reasoning_effort_sort_key(),
+        facet = RequestConversationFacet
+        account_count = int(
+            (
+                await self._session.scalar(
+                    select(func.count())
+                    .select_from(facet)
+                    .where(facet.conversation_id == target, facet.kind == "account")
                 )
             )
-        ).all()
+            or 0
+        )
+        dominant = await self._session.scalar(
+            select(facet.value)
+            .where(facet.conversation_id == target, facet.kind == "useragent")
+            .order_by(facet.request_count.desc(), facet.last_requested_at.desc(), facet.value)
+            .limit(1)
+        )
+        model = RequestConversationModelSummary
+        model_rows = list(
+            (
+                await self._session.scalars(
+                    select(model)
+                    .where(model.conversation_id == target)
+                    .order_by(
+                        model.request_count.desc(),
+                        model.last_requested_at.desc(),
+                        model.model,
+                        case(
+                            (model.reasoning_effort == DIMENSION_SENTINEL, 0),
+                            (model.reasoning_effort == "", 1),
+                            else_=2,
+                        ),
+                        model.reasoning_effort,
+                    )
+                )
+            ).all()
+        )
         return ConversationDetailsResult(
             conversation_id=target,
-            started_at=summary.started_at,
+            started_at=summary.first_requested_at,
             last_requested_at=summary.last_requested_at,
-            account_count=int(summary.account_count),
-            total_elapsed_ms=int(summary.total_elapsed_ms),
+            account_count=account_count,
+            total_elapsed_ms=sum(row.total_elapsed_ms for row in model_rows),
             useragent_group=dominant,
             model_stats=[
                 ConversationModelStatRow(
                     model=row.model,
-                    reasoning_effort=row.reasoning_effort,
-                    request_count=int(row.request_count),
-                    total_elapsed_ms=int(row.total_elapsed_ms),
-                    input_tokens=int(row.input_tokens),
-                    cached_input_tokens=(int(row.cached_input_tokens) if row.cached_input_tokens is not None else None),
-                    output_tokens=int(row.output_tokens),
-                    cost_usd=float(row.cost_usd or 0.0),
+                    reasoning_effort=from_dimension(row.reasoning_effort),
+                    request_count=row.request_count,
+                    total_elapsed_ms=row.total_elapsed_ms,
+                    input_tokens=row.input_tokens,
+                    output_tokens=row.output_tokens,
+                    cached_input_tokens=row.cached_input_tokens if row.cached_known_count else None,
+                    cost_usd=row.cost_usd,
                 )
                 for row in model_rows
             ],
@@ -1064,6 +991,7 @@ class RequestLogsRepository:
             resolved_conversation_id = _normalize_conversation_id(conversation_id)
             resolved_client_ip = client_ip if not isinstance(client_ip, str) or client_ip.strip() else None
             log = RequestLog(
+                conversation_summary_included=True,
                 sticky_key_source=sticky_key_source,
                 sticky_kind=sticky_kind,
                 sticky_key_hash=sticky_key_hash,
@@ -1138,6 +1066,7 @@ class RequestLogsRepository:
             # (sessions run with ``expire_on_commit=False``, so the attach
             # never triggers post-commit lazy loads).
             insert_values = {key: getattr(log, key) for key in _REQUEST_LOG_INSERT_COLUMN_KEYS}
+            summary_contributions = contributions_from_logs([log])
             try:
                 result = typing_cast(
                     CursorResult[Any],
@@ -1148,6 +1077,7 @@ class RequestLogsRepository:
                     log.id = int(inserted_primary_key[0])
                     make_transient_to_detached(log)
                     self._session.add(log)
+                await add_contributions(self._session, summary_contributions)
                 await self._session.commit()
                 return log
             except sa_exc.ResourceClosedError:
@@ -1241,9 +1171,18 @@ class RequestLogsRepository:
                     # bootstrap insert behind it) must not outlive this call.
                     await _safe_rollback(self._session)
                     return 0
-                for log in logs:
-                    log.model = model
-                    log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
+                for start in range(0, len(logs), 500):
+                    chunk = logs[start : start + 500]
+                    before = await capture_contributions(self._session, RequestLog.id.in_([log.id for log in chunk]))
+                    for log in chunk:
+                        log.model = model
+                        log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
+                    await self._session.flush()
+                    await subtract_contributions(self._session, before)
+                    await add_contributions(
+                        self._session,
+                        contributions_from_logs([log for log in chunk if log.conversation_summary_included]),
+                    )
                 await self._session.commit()
             except sa_exc.ResourceClosedError:
                 return 0

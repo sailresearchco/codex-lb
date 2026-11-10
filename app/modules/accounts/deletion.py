@@ -9,13 +9,15 @@ pending-deletion marker (``AccountsRepository.begin_delete``); this module
 drains the bulk rows afterwards, ``DELETE_BATCH_SIZE`` rows per transaction,
 and finalizes with the exact transaction shape the synchronous path used.
 
-Fold-safety argument — why the chunk transactions do NOT take the fold-state
-lock, yet a deleted account's folded rows can never resurrect:
+Request-log chunks acquire the fold-state lock after stabilizing the pending
+account row. They update retained conversation summaries in the same
+transaction as the raw mutation. Usage-history
+chunks do not change these projections or acquire the fold-state lock.
 
-1. Chunk transactions touch only raw rows (``usage_history``,
-   ``additional_usage_history``, ``request_logs``); they never write a rollup
-   table and never move a watermark. ``usage_history`` tables are not
-   fold-governed at all.
+Permanent usage rollups converge at finalization:
+
+1. Chunk transactions do not move permanent rollup watermarks or mirror
+   permanent account totals. ``usage_history`` tables are not fold-governed.
 2. A fold slice that interleaves between chunks may aggregate rows still
    attributed to the account (adding folded rows under the account dimension)
    or rows a chunk already detached (adding them under the orphaned-deleted
@@ -78,11 +80,13 @@ from app.modules.accounts.repository import (
     AccountsRepository,
     credentials_replaced_since_wipe,
 )
+from app.modules.accounts.usage_rollup import lock_fold_state
 from app.modules.proxy.account_cache import (
     get_account_selection_cache,
     mark_account_routing_unavailable,
     propagate_account_routing_change,
 )
+from app.modules.request_logs.conversation_summary import capture_contributions, subtract_contributions
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 logger = logging.getLogger(__name__)
@@ -404,22 +408,22 @@ async def _additional_usage_history_chunk(
 
 
 async def _request_logs_chunk(session: AsyncSession, account_id: str, *, delete_history: bool, batch_size: int) -> int:
-    """Detach (soft) or delete (hard) one chunk of the account's raw logs.
+    """Mutate one fixed batch and subtract retained-summary contributions.
 
-    Deliberately NOT fold-state-locked and NOT mirrored: see the module
-    docstring for why interleaved fold slices converge at finalization.
+    Permanent usage rollups still converge at finalization. The retained
+    conversation projection must reflect each committed chunk immediately.
     """
-    batch = _request_logs_batch(account_id, batch_size).scalar_subquery()
+    await lock_fold_state(session)
+    ids = list((await session.scalars(_request_logs_batch(account_id, batch_size))).all())
+    before = await capture_contributions(session, RequestLog.id.in_(ids))
     if delete_history:
-        result = await session.execute(delete(RequestLog).where(RequestLog.id.in_(batch)).returning(RequestLog.id))
+        await session.execute(delete(RequestLog).where(RequestLog.id.in_(ids)))
     else:
-        result = await session.execute(
-            update(RequestLog)
-            .where(RequestLog.id.in_(batch))
-            .values(account_id=None, deleted_at=utcnow())
-            .returning(RequestLog.id)
+        await session.execute(
+            update(RequestLog).where(RequestLog.id.in_(ids)).values(account_id=None, deleted_at=utcnow())
         )
-    return len(result.scalars().all())
+    await subtract_contributions(session, before)
+    return len(ids)
 
 
 async def _invalidate_account_caches() -> None:

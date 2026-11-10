@@ -17,6 +17,7 @@ def report_fold(monkeypatch):
     fold = AsyncMock(return_value=0)
     monkeypatch.setattr(rollup_scheduler, "run_report_fold_pass", fold)
     monkeypatch.setattr(rollup_scheduler, "run_conversation_fold_pass", AsyncMock(return_value=0))
+    monkeypatch.setattr(rollup_scheduler, "run_conversation_summary_pass", AsyncMock(return_value=0))
     return fold
 
 
@@ -135,3 +136,28 @@ async def test_start_folds_immediately_and_stop_cancels(monkeypatch) -> None:
     await asyncio.wait_for(folded.wait(), timeout=5)
     await scheduler.stop()
     assert scheduler._task is None
+    assert scheduler._summary_task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_owned_summary_backfill(monkeypatch):
+    leader = _GateLeader(leader=True)
+    monkeypatch.setattr(rollup_scheduler, "_get_leader_election", lambda: leader)
+    entered = asyncio.Event()
+    exited = asyncio.Event()
+
+    async def backfill():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            exited.set()
+
+    monkeypatch.setattr(rollup_scheduler, "run_conversation_summary_pass", backfill)
+    scheduler = AccountUsageRollupScheduler(interval_seconds=3600)
+    await scheduler.start()
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    await scheduler.stop()
+    assert exited.is_set()
+    assert scheduler._task is None
+    assert scheduler._summary_task is None

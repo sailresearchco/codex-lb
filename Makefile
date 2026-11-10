@@ -6,6 +6,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_affinity_identity_migration.py \
 	tests/integration/test_conversation_history_index_migration.py \
 	tests/integration/test_conversations_api.py \
+	tests/integration/test_conversation_summaries.py \
+	tests/integration/test_conversation_summary_reset.py \
 	tests/integration/test_dashboard_key_attribution.py \
 	tests/integration/test_cost_backfill.py \
 	tests/integration/test_atomic_quota_warmup_claims.py \
