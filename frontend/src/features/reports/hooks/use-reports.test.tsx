@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { get } from "@/lib/api-client";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { useReports, useReportsOptions } from "./use-reports";
+import { useReports, useReportsOptions, useReportSpeeds } from "./use-reports";
 
 vi.mock("@/lib/api-client", () => ({
   setUnauthorizedHandler: vi.fn(),
@@ -56,6 +56,70 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 const getMock = vi.mocked(get);
+
+describe("useReportSpeeds", () => {
+  beforeEach(() => getMock.mockClear());
+
+  it("fetches only when enabled and forwards every report filter", async () => {
+    const queryClient = createTestQueryClient();
+    const filters = {
+      startDate: "2030-01-09", endDate: "2030-01-15", accountId: ["account-a"],
+      apiKeyId: ["key-a"], model: "model-a", useragent: "client-a",
+    };
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useReportSpeeds(filters, "America/Denver", enabled),
+      { wrapper: createWrapper(queryClient), initialProps: { enabled: false } },
+    );
+    expect(getMock).not.toHaveBeenCalled();
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const [url, , options] = getMock.mock.calls[0];
+    const parsed = new URL(url, "http://localhost");
+    expect(parsed.pathname).toBe("/api/reports/speed");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      start_date: "2030-01-09", end_date: "2030-01-15", account_id: "account-a",
+      api_key_id: "key-a", model: "model-a", useragent_group: "client-a", timezone: "America/Denver",
+    });
+    expect(options?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("aborts obsolete speed reads and does not retry a failed calculation", async () => {
+    const queryClient = createTestQueryClient();
+    getMock.mockImplementationOnce(() => new Promise(() => {}));
+    getMock.mockRejectedValueOnce(new Error("timeout"));
+    const filters = { startDate: "2030-01-09", endDate: "2030-01-15", accountId: [], model: "a" };
+    const { result, rerender } = renderHook(
+      ({ model }) => useReportSpeeds({ ...filters, model }, "UTC", true),
+      { wrapper: createWrapper(queryClient), initialProps: { model: "a" } },
+    );
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(1));
+    const signal = getMock.mock.calls[0][2]?.signal;
+    rerender({ model: "b" });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(signal?.aborted).toBe(true);
+    expect(getMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels a hidden chart only after its last visible observer leaves", async () => {
+    const queryClient = createTestQueryClient();
+    getMock.mockImplementationOnce(() => new Promise(() => {}));
+    const filters = { startDate: "2030-01-09", endDate: "2030-01-15", accountId: [], model: "a" };
+    const wrapper = createWrapper(queryClient);
+    const first = renderHook(({ enabled }) => useReportSpeeds(filters, "UTC", enabled), {
+      wrapper, initialProps: { enabled: true },
+    });
+    const second = renderHook(({ enabled }) => useReportSpeeds(filters, "UTC", enabled), {
+      wrapper, initialProps: { enabled: true },
+    });
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(1));
+    const signal = getMock.mock.calls[0][2]?.signal;
+    first.rerender({ enabled: false });
+    expect(signal?.aborted).toBe(false);
+    second.rerender({ enabled: false });
+    await waitFor(() => expect(signal?.aborted).toBe(true));
+    expect(getMock).toHaveBeenCalledTimes(1);
+  });
+});
 
 function getRequestedSearchParams(): URLSearchParams {
   const [url] = getMock.mock.calls[0] ?? [];

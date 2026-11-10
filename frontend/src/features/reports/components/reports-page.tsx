@@ -8,6 +8,7 @@ import { listAccounts } from "@/features/accounts/api";
 import {
   useReports,
   useReportsOptions,
+  useReportSpeeds,
   useThreadIdentity,
 } from "@/features/reports/hooks/use-reports";
 import { useReportChartVisibility } from "@/features/reports/hooks/use-report-chart-visibility";
@@ -122,6 +123,12 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   }, []);
 
   const reportsQuery = useReports(filters, reportsTimeZone);
+  const showSpeeds = visibleChartIds.some((id) => ["timeToFirstToken", "tokensPerSecond", "queueWait"].includes(id));
+  const speedQuery = useReportSpeeds(filters, reportsTimeZone, showSpeeds);
+  const speedRows = useMemo(() => {
+    const byDate = new Map(speedQuery.data?.daily.map((row) => [row.date, row]));
+    return (reportsQuery.data?.daily ?? []).map((row) => ({ ...row, ...byDate.get(row.date) }));
+  }, [reportsQuery.data?.daily, speedQuery.data?.daily]);
   // Raw-log scan: only issued while the operator keeps the card visible.
   const threadIdentityQuery = useThreadIdentity(
     filters,
@@ -183,6 +190,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   const sharedOptionsError = getErrorMessageOrNull(filterCatalogQuery.error);
   const accountOptionsError = getErrorMessageOrNull(accountsError);
   const threadIdentityError = getErrorMessageOrNull(threadIdentityQuery.error);
+  const speedError = getErrorMessageOrNull(speedQuery.error);
 
   const hasAnyError = Boolean(
     mainReportsError || sharedOptionsError || accountOptionsError,
@@ -198,6 +206,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
       reportsQuery.refetch(),
       filterCatalogQuery.refetch(),
       refetchAccounts(),
+      ...(showSpeeds ? [speedQuery.refetch()] : []),
       ...(visibleChartIds.includes("threadIdentity") ? [threadIdentityQuery.refetch()] : []),
     ]);
   };
@@ -295,8 +304,8 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           {t("reports.refresh")}
         </Button>
       </div>
-      {reportsQuery.data?.speedMetricsAvailable === false ? (
-        <p className="text-sm text-muted-foreground">{t("reports.speedUnavailable", { days: reportsQuery.data.speedMetricsMaxDays ?? 7 })}</p>
+      {showSpeeds && speedQuery.data?.available === false ? (
+        <p className="text-sm text-muted-foreground">{t("reports.speedUnavailable", { days: speedQuery.data.maxDays })}</p>
       ) : null}
       {reportsQuery.isLoading ? (
         <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">
@@ -308,6 +317,21 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
             summary={reportsQuery.data.summary}
             comparison={reportsQuery.data.comparison}
           />
+          {showSpeeds && speedError ? (
+            <div className="flex items-center justify-between gap-2">
+              <AlertMessage variant="error" className="flex-1">
+                {t("reports.errors.speed", { error: speedError, defaultValue: "Unable to load speed metrics: {{error}}" })}
+              </AlertMessage>
+              <Button variant="outline" size="sm" disabled={speedQuery.isFetching}
+                onClick={() => { void speedQuery.refetch(); }}>
+                {t("common.actions.retry")}
+              </Button>
+            </div>
+          ) : showSpeeds && speedQuery.isLoading ? (
+            <p role="status" className="text-sm text-muted-foreground">
+              {t("reports.speedLoading", { defaultValue: "Loading speed metrics…" })}
+            </p>
+          ) : null}
           {visibleChartIds.length > 0 ? (
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {visibleChartIds.includes("costByDay") ? (
@@ -328,30 +352,30 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
                   />
                 </Suspense>
               ) : null}
-              {reportsQuery.data.speedMetricsAvailable !== false && visibleChartIds.includes("timeToFirstToken") ? (
+              {speedQuery.data?.available && !speedError && visibleChartIds.includes("timeToFirstToken") ? (
                 <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
                   <TimeToFirstTokenChart
                     startDate={filters.startDate}
                     endDate={filters.endDate}
-                    data={reportsQuery.data.daily}
+                    data={speedRows}
                   />
                 </Suspense>
               ) : null}
-              {reportsQuery.data.speedMetricsAvailable !== false && visibleChartIds.includes("tokensPerSecond") ? (
+              {speedQuery.data?.available && !speedError && visibleChartIds.includes("tokensPerSecond") ? (
                 <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
                   <TokensPerSecondChart
                     startDate={filters.startDate}
                     endDate={filters.endDate}
-                    data={reportsQuery.data.daily}
+                    data={speedRows}
                   />
                 </Suspense>
               ) : null}
-              {reportsQuery.data.speedMetricsAvailable !== false && visibleChartIds.includes("queueWait") ? (
+              {speedQuery.data?.available && !speedError && visibleChartIds.includes("queueWait") ? (
                 <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
                   <QueueWaitChart
                     startDate={filters.startDate}
                     endDate={filters.endDate}
-                    data={reportsQuery.data.daily}
+                    data={speedRows}
                   />
                 </Suspense>
               ) : null}
@@ -359,9 +383,15 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           ) : null}
           {visibleChartIds.includes("threadIdentity") ? (
             threadIdentityError ? (
-              <AlertMessage variant="error">
-                {t("reports.errors.threadIdentity", { error: threadIdentityError })}
-              </AlertMessage>
+              <div className="flex items-center justify-between gap-2">
+                <AlertMessage variant="error" className="flex-1">
+                  {t("reports.errors.threadIdentity", { error: threadIdentityError })}
+                </AlertMessage>
+                <Button variant="outline" size="sm" disabled={threadIdentityQuery.isFetching}
+                  onClick={() => { void threadIdentityQuery.refetch(); }}>
+                  {t("common.actions.retry")}
+                </Button>
+              </div>
             ) : threadIdentityQuery.data ? (
               <ThreadIdentityCard data={threadIdentityQuery.data} />
             ) : null

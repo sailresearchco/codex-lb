@@ -1,6 +1,7 @@
 import { get } from "@/lib/api-client";
 import {
   ReportsResponseSchema,
+  ReportSpeedResponseSchema,
   ReportsOptionsResponseSchema,
   ThreadIdentityResponseSchema,
 } from "./schemas";
@@ -38,6 +39,10 @@ function reportQuery(params: ReportsParams): string {
 
 export function getReports(params: ReportsParams = {}, signal?: AbortSignal) {
   return get(`/api/reports${reportQuery(params)}`, ReportsResponseSchema, { signal });
+}
+
+export function getReportSpeeds(params: ReportsParams = {}, signal?: AbortSignal) {
+  return get(`/api/reports/speed${reportQuery(params)}`, ReportSpeedResponseSchema, { signal });
 }
 
 export function getReportsOptions(params: Omit<ReportsParams, "model" | "useragent"> = {}, signal?: AbortSignal) {

@@ -87,6 +87,17 @@ export const ReportsResponseSchema = z.object({
   byAccount: z.array(AccountCostEntrySchema),
 });
 
+export const ReportSpeedResponseSchema = z.object({
+  available: z.boolean(),
+  maxDays: z.number(),
+  daily: z.array(z.object({
+    date: z.string(),
+    medianTtftMs: z.number(),
+    medianTps: z.number(),
+    medianQueueMs: z.number(),
+  })),
+});
+
 const ThreadIdentityFacetSchema = z.object({
   requests: z.number(),
   requestShare: z.number(),

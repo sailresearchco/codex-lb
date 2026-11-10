@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from datetime import date
 from time import monotonic
 
-from app.modules.reports.schemas import ReportsOptionsResponse, ReportsResponse, ThreadIdentityResponse
+from app.modules.reports.schemas import (
+    ReportsOptionsResponse,
+    ReportSpeedResponse,
+    ReportsResponse,
+    ThreadIdentityResponse,
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +73,7 @@ _THREAD_IDENTITY_TTL_SECONDS = 300.0
 class ReportsCaches:
     def __init__(self) -> None:
         self.reports = ReportCache[ReportCacheKey, ReportsResponse]()
+        self.speeds = ReportCache[ReportCacheKey, ReportSpeedResponse](ttl_seconds=300)
         self.options = ReportCache[ReportCacheKey, ReportsOptionsResponse]()
         self.thread_identity = ReportCache[ReportCacheKey, ThreadIdentityResponse](
             ttl_seconds=_THREAD_IDENTITY_TTL_SECONDS
