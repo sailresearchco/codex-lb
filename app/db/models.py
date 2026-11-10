@@ -278,6 +278,9 @@ class AccountUsageRollupState(Base):
         nullable=True,
         server_default=text("'1970-01-01 00:00:00'"),
     )
+    # Fixed end of an in-progress repair. Normal folding may advance its
+    # watermark between repair passes; a restart must resume the same range.
+    upgrade_repair_through: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     reports_folded_through: Mapped[datetime] = mapped_column(
         DateTime,

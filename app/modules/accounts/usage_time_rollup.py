@@ -119,7 +119,9 @@ TS_MAX_SLICES_PER_PASS = 20
 # advances the watermark by minutes-to-hours — far below this span — and the
 # rollout that makes interludes possible also guarantees another new-code
 # process (the old replica's replacement) starts afterwards and runs this
-# defense. Cost: one backfill-slice-equivalent per process start.
+# defense. The range is persisted before work starts and replaced one whole
+# hour per transaction, releasing the writer between hours. An hour is a
+# time bound, not a row or work bound: dense hours can still be expensive.
 #
 # Both paths clamp to hours fully covered by surviving raw rows (retention
 # prunes oldest-first with a contiguous frontier, so every row at or above
@@ -127,6 +129,7 @@ TS_MAX_SLICES_PER_PASS = 20
 # statistics it cannot recompute; clamped-out buckets keep the disclosed
 # legacy fold. Neither path is a historical backfill.
 UPGRADE_REPAIR_WINDOW = timedelta(hours=48)
+UPGRADE_REPAIR_SLICE = timedelta(hours=1)
 _upgrade_repair_done = False
 
 _EPOCH = datetime(1970, 1, 1)
@@ -680,10 +683,10 @@ async def _run_upgrade_repair() -> bool:
     """Drive the upgrade repair in pass-bounded chunks; True when complete.
 
     Same chunk/transaction discipline as the fold backfill: at most
-    `TS_MAX_SLICES_PER_PASS` chunks of `TS_FOLD_SLICE` per pass, each in its
-    own transaction, so repairing a legacy-folded backlog never monopolizes
-    a scheduler tick. An incomplete repair returns False and resumes from
-    the persisted marker on the next pass.
+    `TS_MAX_SLICES_PER_PASS` transactions per pass, each replacing at most
+    `UPGRADE_REPAIR_SLICE` of history. Initializing the fixed repair range
+    also consumes one transaction. An incomplete repair returns False and
+    resumes from the persisted range on the next pass.
     """
     for _ in range(TS_MAX_SLICES_PER_PASS):
         async with get_background_session() as session:
@@ -695,10 +698,9 @@ async def _run_upgrade_repair() -> bool:
 async def _repair_next_upgrade_chunk(session: AsyncSession) -> bool:
     """Refold the next chunk of the legacy-suspect range; True when none left.
 
-    The suspect range is `[upgrade_repair_from, watermark)` while the marker
-    is set (stamped by the migration, or the epoch server default for a
-    state row an old replica bootstrapped after it), and the trailing
-    `UPGRADE_REPAIR_WINDOW` flip-flop defense once it is NULL. Both are
+    A new repair captures the current watermark as its fixed end, starting
+    at `upgrade_repair_from` when set (the legacy migration marker), or at
+    the trailing `UPGRADE_REPAIR_WINDOW` flip-flop defense when NULL. Both are
     clamped to `ceil_hour(earliest surviving raw row)` — an unfiltered min:
     retention's oldest-first contiguous frontier guarantees every row
     (soft-deleted included) at or above it survives, so the repair never
@@ -720,15 +722,27 @@ async def _repair_next_upgrade_chunk(session: AsyncSession) -> bool:
             return True
         watermark = state.hourly_folded_through
         marker = state.upgrade_repair_from
+        target = state.upgrade_repair_through or watermark
         suspect_from = marker if marker is not None else watermark - UPGRADE_REPAIR_WINDOW
         earliest_raw = (await session.execute(select(func.min(RequestLog.requested_at)))).scalar_one_or_none()
-        start = watermark if earliest_raw is None else max(suspect_from, _ceil_to_hour(earliest_raw))
-        if start >= watermark:
-            if marker is not None:
-                await _set_upgrade_repair_marker(session, None)
+        start = target if earliest_raw is None else max(suspect_from, _ceil_to_hour(earliest_raw))
+        if start >= target:
+            if earliest_raw is not None and start < watermark:
+                await _set_upgrade_repair_range(session, start, watermark)
+                await session.commit()
+                return False
+            if marker is not None or state.upgrade_repair_through is not None:
+                await _set_upgrade_repair_range(session, None, None)
                 await session.commit()
             return True
-        chunk_end = min(start + TS_FOLD_SLICE, watermark)
+        if state.upgrade_repair_through is None:
+            # Persist even the initially-NULL marker before touching rollups.
+            # A cancelled first chunk then resumes this exact range, rather
+            # than restarting a moving trailing window after a process restart.
+            await _set_upgrade_repair_range(session, start, target)
+            await session.commit()
+            return False
+        chunk_end = min(start + UPGRADE_REPAIR_SLICE, target)
         start_epoch, end_epoch = epoch_seconds(start), epoch_seconds(chunk_end)
         await session.execute(
             delete(RequestUsageHourlyRollup).where(
@@ -752,9 +766,12 @@ async def _repair_next_upgrade_chunk(session: AsyncSession) -> bool:
         await session.execute(_hourly_fold_insert(session, window))
         await session.execute(_error_fold_insert(session, window))
         await session.execute(_demand_fold_insert(session, window))
-        done = chunk_end >= watermark
-        if marker is not None:
-            await _set_upgrade_repair_marker(session, None if done else chunk_end)
+        # Another (possibly legacy) leader may have folded more history
+        # between passes. Finish the fixed range before capturing that
+        # follow-up range; never move the target of an unfinished range.
+        next_target = watermark if chunk_end >= target else target
+        done = chunk_end >= next_target
+        await _set_upgrade_repair_range(session, None if done else chunk_end, None if done else next_target)
         await session.commit()
         logger.info(
             "Refolded hourly usage rollups in [%s, %s) (post-upgrade repair)",
@@ -764,11 +781,11 @@ async def _repair_next_upgrade_chunk(session: AsyncSession) -> bool:
         return done
 
 
-async def _set_upgrade_repair_marker(session: AsyncSession, value: datetime | None) -> None:
+async def _set_upgrade_repair_range(session: AsyncSession, start: datetime | None, end: datetime | None) -> None:
     await session.execute(
         update(AccountUsageRollupState)
         .where(AccountUsageRollupState.id == _STATE_ROW_ID)
-        .values(upgrade_repair_from=value)
+        .values(upgrade_repair_from=start, upgrade_repair_through=end)
     )
 
 
