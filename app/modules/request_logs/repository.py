@@ -1078,8 +1078,10 @@ class RequestLogsRepository:
                 inserted_primary_key = result.inserted_primary_key
                 if late_append:
                     from app.modules.reports.speed_histogram import fold_late_speed_log
+                    from app.modules.reports.thread_rollup import mark_late_thread_write
 
                     await fold_late_speed_log(self._session, log)
+                    await mark_late_thread_write(self._session, log.requested_at)
                 if inserted_primary_key is not None and inserted_primary_key[0] is not None:
                     log.id = int(inserted_primary_key[0])
                     make_transient_to_detached(log)

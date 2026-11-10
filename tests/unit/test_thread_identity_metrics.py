@@ -20,6 +20,7 @@ from app.modules.reports.thread_identity import (
     ThreadIdentityFacetRow,
     aggregate_thread_identity,
 )
+from app.modules.reports.thread_rollup import fold_next_thread_slice
 
 pytestmark = pytest.mark.unit
 
@@ -94,6 +95,13 @@ async def _seed(session: AsyncSession, logs: list[RequestLog]) -> None:
 
 async def _aggregate(session: AsyncSession) -> dict[bool, ThreadIdentityFacetRow]:
     return await aggregate_thread_identity(session, WINDOW_START, WINDOW_END)
+
+
+async def _prepare_cache(session: AsyncSession) -> None:
+    for _ in range(8):
+        if not await fold_next_thread_slice(session, WINDOW_END):
+            return
+    pytest.fail("fixture cache did not finish")
 
 
 async def test_conversation_and_session_keys_both_count_as_keyed(async_session: AsyncSession) -> None:
@@ -392,6 +400,7 @@ async def test_service_derives_ratios_and_marks_unkeyed_approximate(async_sessio
             _log("u1", minutes=0, input_tokens=10_000, cached_input_tokens=0),
         ],
     )
+    await _prepare_cache(async_session)
     service = ReportsService(ReportsRepository(async_session))
 
     response = await service.get_thread_identity(WINDOW_DAY, WINDOW_DAY, "UTC")
@@ -439,6 +448,7 @@ async def test_service_honours_the_report_timezone(async_session: AsyncSession) 
     )
     service = ReportsService(ReportsRepository(async_session))
 
+    await _prepare_cache(async_session)
     response = await service.get_thread_identity(WINDOW_DAY, WINDOW_DAY, "Asia/Seoul")
 
     assert response.total_requests == 1

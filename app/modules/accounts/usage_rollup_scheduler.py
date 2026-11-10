@@ -10,6 +10,7 @@ from app.modules.accounts.usage_rollup import run_fold_pass
 from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
 from app.modules.reports.rollup import run_report_fold_pass
 from app.modules.reports.speed_histogram import run_speed_histogram_fold_pass
+from app.modules.reports.thread_rollup import run_thread_fold_pass
 from app.modules.request_logs.conversation_summary import run_conversation_summary_pass
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,10 @@ class AccountUsageRollupScheduler:
                 await run_speed_histogram_fold_pass()
             except Exception:
                 logger.exception("Report speed histogram fold pass failed")
+            try:
+                await run_thread_fold_pass()
+            except Exception:
+                logger.exception("Thread identity cache fold pass failed")
 
 
 def build_account_usage_rollup_scheduler() -> AccountUsageRollupScheduler:

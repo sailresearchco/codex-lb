@@ -10,8 +10,8 @@ drains the bulk rows afterwards, ``DELETE_BATCH_SIZE`` rows per transaction,
 and finalizes with the exact transaction shape the synchronous path used.
 
 Request-log chunks acquire the fold-state lock after stabilizing the pending
-account row. They update retained conversation summaries in the same
-transaction as the raw mutation. Usage-history
+account row. They update retained conversation summaries and mark affected
+thread hours dirty in the same transaction as the raw mutation. Usage-history
 chunks do not change these projections or acquire the fold-state lock.
 
 Permanent usage rollups converge at finalization:
@@ -415,6 +415,9 @@ async def _request_logs_chunk(session: AsyncSession, account_id: str, *, delete_
     """
     await lock_fold_state(session)
     ids = list((await session.scalars(_request_logs_batch(account_id, batch_size))).all())
+    from app.modules.reports.thread_rollup import mark_thread_hours_dirty
+
+    await mark_thread_hours_dirty(session, ids)
     before = await capture_contributions(session, RequestLog.id.in_(ids))
     if delete_history:
         await session.execute(delete(RequestLog).where(RequestLog.id.in_(ids)))

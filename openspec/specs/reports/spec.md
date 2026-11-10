@@ -101,3 +101,38 @@ The `GET /api/reports` endpoint MUST support filtering report aggregations by on
 #### Scenario: Default all API Keys when unselected
 - **WHEN** `GET /api/reports` is requested without any `api_key_id` query parameter
 - **THEN** report metrics SHALL aggregate across all API keys without filtering by key ID.
+
+### Requirement: Retained thread identity uses exact hourly caches
+
+Thread identity metrics SHALL retain the existing seven-day window ceiling, pool-wide scope, and keyed/unkeyed facets. The effective thread key SHALL be the normalized conversation identifier, then normalized session identifier, then API key for unkeyed traffic. Conversation and session identifiers SHALL share a namespace; keyed and unkeyed groups SHALL remain separate. Missing effective keys SHALL contribute request/cache counts but no conversation or turn counts. Internal warmup traffic SHALL be excluded and soft-deleted traffic SHALL remain included.
+
+Complete folded UTC hours SHALL use disposable header, account-presence, and directed-pair caches describing retained raw history. Partial hours and the live tail SHALL use exact raw rows; the uncovered live tail SHALL be no longer than four hours, measured through the earlier of the requested end and the current time. Coverage, repair markers, folded data, and raw edges SHALL share one statement snapshot. Incomplete coverage SHALL raise `thread_identity_building`; overlapping dirty hours SHALL raise `thread_identity_repairing`. Requests wider than seven days SHALL retain the existing `available=false` response. Request handling SHALL NOT backfill caches or fall back to a full-history scan.
+
+#### Scenario: Hour boundaries preserve thread semantics
+- **GIVEN** one thread spans folded hours and partial or live raw edges
+- **WHEN** its metrics are read
+- **THEN** consecutive requests SHALL be ordered by timestamp and row id across all segments
+- **AND** a turn SHALL require attributed endpoints and a whole-second gap strictly below 600 seconds
+- **AND** unkeyed turns SHALL additionally require known, nonshrinking input-token counts, while keyed turns SHALL retain failure-adjacent requests with missing usage
+- **AND** distinct accounts and the three-request conversation threshold SHALL be evaluated over the whole selected window
+- **AND** cache totals SHALL include only successful requests with more than 5,000 input tokens
+
+#### Scenario: History changes never publish stale repaired metrics
+- **WHEN** hard deletion, partial retention, or an explicitly backdated append changes a folded hour
+- **THEN** the same mutation transaction SHALL mark that hour dirty before it becomes visible
+- **AND** requests touching it SHALL report repairing until an atomic background rebuild completes
+- **AND** an earlier successful response SHALL NOT remain cached across that repair
+- **AND** fully pruned hour caches SHALL be removed rather than preserved as permanent history
+
+#### Scenario: Account attribution changes preserve adjacency
+- **WHEN** an account is detached or merged
+- **THEN** account presence and header endpoints SHALL follow the raw attribution change
+- **AND** turn counts SHALL remain determined by consecutive surviving requests, with switches computed from the resulting endpoint identities
+- **AND** hard deletion of a middle request SHALL rebuild newly adjacent endpoint pairs
+
+#### Scenario: Cache construction is resumable background work
+- **WHEN** cache construction or repair runs
+- **THEN** each transaction SHALL cover at most one UTC hour and each pass at most eight transactions
+- **AND** the migration SHALL create empty caches without scanning raw history
+- **AND** interrupted transactions SHALL leave the prior cache and durable repair marker intact
+- **AND** concurrent late writes SHALL either be included in the published hour or leave a repair marker after publication

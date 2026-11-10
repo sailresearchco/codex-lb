@@ -298,6 +298,9 @@ class AccountUsageRollupState(Base):
     # A backdated insert can lower MIN(raw.requested_at), but cannot restore
     # the missing samples needed to answer a partial-hour speed report.
     request_logs_pruned_through: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    thread_folded_through: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=text("'1970-01-01 00:00:00'")
+    )
 
 
 class RequestReportHourlyRollup(Base):
@@ -3189,3 +3192,50 @@ Index(
     AdditionalUsageHistory.used_percent.desc(),
     AdditionalUsageHistory.id.desc(),
 )
+
+
+class ThreadIdentityHour(Base):
+    """Disposable hourly cache of retained traffic, including detached rows."""
+
+    __tablename__ = "thread_identity_hours"
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    keyed: Mapped[int] = mapped_column(Integer, primary_key=True)
+    thread_key: Mapped[str] = mapped_column(String, primary_key=True)
+    requests: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cache_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cache_cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    first_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    first_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    first_account: Mapped[str | None] = mapped_column(String)
+    first_input: Mapped[int | None] = mapped_column(BigInteger)
+    first_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_account: Mapped[str | None] = mapped_column(String)
+    last_input: Mapped[int | None] = mapped_column(BigInteger)
+    last_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class ThreadIdentityAccountHour(Base):
+    __tablename__ = "thread_identity_account_hours"
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    keyed: Mapped[int] = mapped_column(Integer, primary_key=True)
+    thread_key: Mapped[str] = mapped_column(String, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    requests: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class ThreadIdentityPairHour(Base):
+    __tablename__ = "thread_identity_pair_hours"
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    keyed: Mapped[int] = mapped_column(Integer, primary_key=True)
+    thread_key: Mapped[str] = mapped_column(String, primary_key=True)
+    from_account: Mapped[str] = mapped_column(String, primary_key=True)
+    to_account: Mapped[str] = mapped_column(String, primary_key=True)
+    turns: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class ThreadIdentityDirtyHour(Base):
+    __tablename__ = "thread_identity_dirty_hours"
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
