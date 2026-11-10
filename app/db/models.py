@@ -288,6 +288,16 @@ class AccountUsageRollupState(Base):
         nullable=False,
         server_default=text("'1970-01-01 00:00:00'"),
     )
+    speed_folded_through: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("'1970-01-01 00:00:00'"),
+    )
+    speed_history_from: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Inclusive, monotonic maximum timestamp actually removed by retention.
+    # A backdated insert can lower MIN(raw.requested_at), but cannot restore
+    # the missing samples needed to answer a partial-hour speed report.
+    request_logs_pruned_through: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class RequestReportHourlyRollup(Base):
@@ -315,6 +325,19 @@ class RequestReportHourlyRollup(Base):
     reasoning_usage_known_requests: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"))
+
+
+class RequestReportSpeedHistogram(Base):
+    __tablename__ = "request_report_speed_histograms"
+
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    useragent_group: Mapped[str] = mapped_column(String, primary_key=True)
+    metric: Mapped[str] = mapped_column(String, primary_key=True)
+    bin_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sample_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class RequestUsageHourlyRollup(Base):

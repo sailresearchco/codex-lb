@@ -17,6 +17,7 @@ from app.modules.reports.filters import (
 )
 from app.modules.reports.rollup import MEASURES
 from app.modules.reports.rollup_read import report_source
+from app.modules.reports.speed_histogram_read import SpeedHistogramResult, read_speed_histograms
 from app.modules.reports.thread_identity import ThreadIdentityFacetRow, aggregate_thread_identity
 
 _SQLITE_COMPOUND_SELECT_LIMIT = 500
@@ -26,14 +27,6 @@ MAX_SPEED_REPORT_DAYS = 7
 
 class DailyReportRangeTooLargeError(ValueError):
     pass
-
-
-@dataclass(frozen=True)
-class DailySpeedAggregateRow:
-    date: str
-    median_ttft_ms: float
-    median_tps: float
-    median_queue_ms: float
 
 
 @dataclass(frozen=True)
@@ -163,27 +156,17 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
-    ) -> list[DailySpeedAggregateRow]:
+    ) -> SpeedHistogramResult:
         if (end_date - start_date).days + 1 > MAX_SPEED_REPORT_DAYS:
             raise DailyReportRangeTooLargeError(f"speed report date range must be {MAX_SPEED_REPORT_DAYS} days or less")
-        rows = await self._session.execute(
-            _daily_speed_medians_stmt(
-                list(_daily_bucket_ranges(start_date, end_date, timezone_info)),
-                account_ids,
-                model,
-                useragent_group,
-                api_key_ids,
-            )
+        return await read_speed_histograms(
+            self._session,
+            list(_daily_bucket_ranges(start_date, end_date, timezone_info)),
+            account_ids,
+            model,
+            useragent_group,
+            api_key_ids,
         )
-        return [
-            DailySpeedAggregateRow(
-                date=row.report_date,
-                median_ttft_ms=float(row.median_ttft_ms or 0),
-                median_tps=float(row.median_tps or 0),
-                median_queue_ms=float(row.median_queue_ms or 0),
-            )
-            for row in rows
-        ]
 
     async def aggregate_summary(
         self,

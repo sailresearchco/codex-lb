@@ -24,6 +24,7 @@ import type { ModelDistributionDonutProps } from "./model-distribution-donut";
 import type { UseragentDistributionDonutProps } from "./useragent-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
 import { ThreadIdentityCard } from "./thread-identity-card";
+import { SpeedCoverage } from "./speed-coverage";
 import {
   daysAgoLocalISO,
   getBrowserReportsTimeZone,
@@ -304,8 +305,9 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           {t("reports.refresh")}
         </Button>
       </div>
-      {showSpeeds && speedQuery.data?.available === false ? (
-        <p className="text-sm text-muted-foreground">{t("reports.speedUnavailable", { days: speedQuery.data.maxDays })}</p>
+      {showSpeeds && speedQuery.data && !speedError ? (
+        <SpeedCoverage data={speedQuery.data} fetching={speedQuery.isFetching}
+          retry={() => { void speedQuery.refetch(); }} />
       ) : null}
       {reportsQuery.isLoading ? (
         <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">
@@ -358,6 +360,9 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
                     startDate={filters.startDate}
                     endDate={filters.endDate}
                     data={speedRows}
+                    sampleCounts={speedQuery.data.approximate
+                      ? Object.fromEntries(speedQuery.data.daily.map((day) => [day.date, day.ttft?.sampleCount ?? 0]))
+                      : undefined}
                   />
                 </Suspense>
               ) : null}
@@ -367,6 +372,9 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
                     startDate={filters.startDate}
                     endDate={filters.endDate}
                     data={speedRows}
+                    sampleCounts={speedQuery.data.approximate
+                      ? Object.fromEntries(speedQuery.data.daily.map((day) => [day.date, day.tps?.sampleCount ?? 0]))
+                      : undefined}
                   />
                 </Suspense>
               ) : null}
@@ -376,6 +384,9 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
                     startDate={filters.startDate}
                     endDate={filters.endDate}
                     data={speedRows}
+                    sampleCounts={speedQuery.data.approximate
+                      ? Object.fromEntries(speedQuery.data.daily.map((day) => [day.date, day.queue?.sampleCount ?? 0]))
+                      : undefined}
                   />
                 </Suspense>
               ) : null}

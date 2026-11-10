@@ -9,6 +9,7 @@ from app.db import dashboard_reads
 from app.db.models import RequestLog
 from app.db.session import SessionLocal, engine
 from app.modules.reports import repository
+from app.modules.reports.speed_histogram import run_speed_histogram_fold_pass
 
 pytestmark = pytest.mark.integration
 
@@ -26,8 +27,19 @@ async def test_cost_report_does_not_run_speed_calculation(async_client, db_setup
     assert response.json()["speedMetricsAvailable"] is False
 
 
-async def test_speed_endpoint_preserves_exact_medians_and_filters(async_client, db_setup):
+async def test_speed_endpoint_encloses_exact_medians_and_preserves_filters(async_client, db_setup):
     async with SessionLocal() as session:
+        # Establish the fixture's complete retained-day coverage. Warmup
+        # requests must not contribute to any speed metric.
+        session.add(
+            RequestLog(
+                request_id="coverage-start",
+                requested_at=datetime(2026, 11, 1),
+                model="warmup",
+                status="success",
+                request_kind="warmup",
+            )
+        )
         for i, ttft in enumerate((10, 30, 50)):
             session.add(
                 RequestLog(
@@ -55,19 +67,35 @@ async def test_speed_endpoint_preserves_exact_medians_and_filters(async_client, 
             )
         )
         await session.commit()
+    for _ in range(4):
+        await run_speed_histogram_fold_pass(now=datetime(2026, 11, 2, 3))
     response = await async_client.get("/api/reports/speed", params={**PARAMS, "model": "wanted"})
     assert response.status_code == 200
-    assert response.json() == {
-        "available": True,
-        "maxDays": 7,
-        "daily": [{"date": "2026-11-01", "medianTtftMs": 30.0, "medianTps": 100.0, "medianQueueMs": 3.0}],
-    }
+    body = response.json()
+    assert body["available"] is True
+    assert body["approximate"] is True
+    assert body["unavailableReason"] is None
+    assert body["coverageFrom"] == "2026-11-01T00:00:00Z"
+    assert body["foldedThrough"].endswith("Z")
+    assert len(body["daily"]) == 1
+    row = body["daily"][0]
+    for metric, estimate_key, exact in (
+        ("ttft", "medianTtftMs", 30),
+        ("tps", "medianTps", 100),
+        ("queue", "medianQueueMs", 3),
+    ):
+        bounds = row[metric]
+        assert bounds["sampleCount"] == 3
+        assert bounds["lowerBound"] <= exact <= bounds["upperBound"]
+        assert abs(row[estimate_key] - exact) <= exact * bounds["relativeErrorBound"]
     # A differently filtered request must not reuse the first filter's cache.
     excluded = await async_client.get("/api/reports/speed", params={**PARAMS, "model": "missing"})
     assert excluded.status_code == 200
-    assert excluded.json()["daily"] == [
-        {"date": "2026-11-01", "medianTtftMs": 0.0, "medianTps": 0.0, "medianQueueMs": 0.0}
-    ]
+    empty = excluded.json()["daily"][0]
+    for metric in ("ttft", "tps", "queue"):
+        assert empty[metric]["sampleCount"] == 0
+        assert empty[metric]["lowerBound"] is None
+        assert empty[metric]["upperBound"] is None
 
 
 async def test_long_speed_range_does_not_scan_requests(async_client, db_setup, monkeypatch):
@@ -77,7 +105,21 @@ async def test_long_speed_range_does_not_scan_requests(async_client, db_setup, m
     monkeypatch.setattr(repository.ReportsRepository, "aggregate_daily_speeds", forbidden)
     response = await async_client.get("/api/reports/speed", params={**PARAMS, "end_date": "2026-11-30"})
     assert response.status_code == 200
-    assert response.json() == {"available": False, "maxDays": 7, "daily": []}
+    assert response.json()["available"] is False
+    assert response.json()["unavailableReason"] == "range_too_large"
+    assert response.json()["daily"] == []
+
+
+async def test_cold_speed_history_reports_building_without_scanning_raw(async_client, db_setup, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Cold histogram coverage must not fall back to raw medians")
+
+    monkeypatch.setattr(repository, "_daily_speed_medians_stmt", forbidden)
+    response = await async_client.get("/api/reports/speed", params=PARAMS)
+    assert response.status_code == 200
+    assert response.json()["available"] is False
+    assert response.json()["unavailableReason"] == "building"
+    assert response.json()["daily"] == []
 
 
 async def test_speed_timeout_does_not_block_cost_report(async_client, db_setup, monkeypatch):

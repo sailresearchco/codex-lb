@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Literal
 
 from pydantic import Field
 
@@ -31,16 +32,32 @@ class ModelCostEntry(DashboardModel):
     percentage: float = 0.0
 
 
+class SpeedMedianBounds(DashboardModel):
+    sample_count: int
+    lower_bound: float | None
+    upper_bound: float | None
+    relative_error_bound: float | None
+    clipped: bool
+
+
 class DailySpeedRow(DashboardModel):
     date: str
     median_ttft_ms: float
     median_tps: float
     median_queue_ms: float
+    ttft: SpeedMedianBounds
+    tps: SpeedMedianBounds
+    queue: SpeedMedianBounds
 
 
 class ReportSpeedResponse(DashboardModel):
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     available: bool
     max_days: int
+    approximate: bool = True
+    unavailable_reason: Literal["range_too_large", "building", "raw_history_pruned"] | None = None
+    coverage_from: datetime | None = None
+    folded_through: datetime | None = None
     daily: list[DailySpeedRow] = Field(default_factory=list)
 
 
