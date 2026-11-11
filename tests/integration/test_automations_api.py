@@ -226,7 +226,7 @@ async def test_automations_api_crud(async_client):
 
 
 @pytest.mark.asyncio
-async def test_automations_write_endpoints_require_dashboard_write_access(app_instance):
+async def test_automations_reads_and_writes_reject_guest_access(app_instance):
     accounts = await _create_accounts("auto-guest-canary")
     async with app_instance.router.lifespan_context(app_instance):
         local_transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
@@ -270,10 +270,14 @@ async def test_automations_write_endpoints_require_dashboard_write_access(app_in
             assert session_payload["permissions"] == ["read", "accounts:read:all", "dashboard:read:all"]
 
             list_response = await remote_client.get("/api/automations")
-            assert list_response.status_code == 200
+            assert list_response.status_code == 403
+            assert list_response.json()["error"]["code"] == "permission_required"
+            assert list_response.json()["error"]["param"] == "ops:write"
 
             runs_response = await remote_client.get(f"/api/automations/{automation_id}/runs")
-            assert runs_response.status_code == 200
+            assert runs_response.status_code == 403
+            assert runs_response.json()["error"]["code"] == "permission_required"
+            assert runs_response.json()["error"]["param"] == "ops:write"
 
             blocked_create = await remote_client.post(
                 "/api/automations",

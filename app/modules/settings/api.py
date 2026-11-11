@@ -278,7 +278,7 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         limit_warmup_enabled=settings.limit_warmup_enabled,
         limit_warmup_windows=settings.limit_warmup_windows,
         limit_warmup_model=settings.limit_warmup_model,
-        limit_warmup_prompt=settings.limit_warmup_prompt,
+        limit_warmup_prompt=settings.limit_warmup_prompt if principal.has(Permission.OPS_WRITE) else "[redacted]",
         limit_warmup_cooldown_seconds=settings.limit_warmup_cooldown_seconds,
         limit_warmup_exhausted_threshold_percent=settings.limit_warmup_exhausted_threshold_percent,
         limit_warmup_idle_threshold_percent=settings.limit_warmup_idle_threshold_percent,

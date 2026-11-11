@@ -81,6 +81,13 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("GET", "/api/settings/upstream-proxy"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/settings/runtime/connect-address"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/sticky-sessions"): PermissionRequirement(Permission.OPS_WRITE),
+    ("GET", "/api/automations"): PermissionRequirement(Permission.OPS_WRITE),
+    ("GET", "/api/automations/options"): PermissionRequirement(Permission.OPS_WRITE),
+    ("GET", "/api/automations/runs"): PermissionRequirement(Permission.OPS_WRITE),
+    ("GET", "/api/automations/runs/options"): PermissionRequirement(Permission.OPS_WRITE),
+    ("GET", "/api/automations/runs/{run_id}/details"): PermissionRequirement(Permission.OPS_WRITE),
+    ("GET", "/api/automations/{automation_id}/runs"): PermissionRequirement(Permission.OPS_WRITE),
+    ("GET", "/api/model-sources/"): PermissionRequirement(Permission.OPS_WRITE),
     # The cache isolation probe spends real account quota, so both its cost
     # preview and its run sit on the operational write gate.
     ("GET", "/api/diagnostics/cache-isolation-probe"): PermissionRequirement(Permission.OPS_WRITE),
