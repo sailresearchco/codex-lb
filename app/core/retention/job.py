@@ -148,8 +148,11 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                 ids = list((await session.scalars(batch_ids)).all())
                 deleted = 0
                 pruned_through: datetime | None = None
+                from app.modules.reports.thread_rollup import evict_pruned_thread_hours, mark_thread_hours_dirty
+
                 for start in range(0, len(ids), 500):
                     chunk = ids[start : start + 500]
+                    await mark_thread_hours_dirty(session, chunk)
                     before = await capture_contributions(session, RequestLog.id.in_(chunk))
                     removed = list(
                         (
@@ -176,6 +179,7 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                         )
                         .values(request_logs_pruned_through=pruned_through)
                     )
+                await evict_pruned_thread_hours(session)
                 await session.commit()
         total += deleted
         if deleted < BATCH_SIZE:

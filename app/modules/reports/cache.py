@@ -69,10 +69,10 @@ class ReportCache[K: Hashable, T]:
             return value
 
 
-# Thread identity scans raw request logs instead of the hourly rollup, so a
-# miss is seconds rather than milliseconds. The figures move slowly (they are
-# whole-window aggregates), so they tolerate a longer TTL than the cost report.
-_THREAD_IDENTITY_TTL_SECONDS = 300.0
+# Retained-history thread metrics must observe repair markers and completed
+# repairs together. Keep owned-computation serialization without retaining a
+# response that could hide a dirty hour or outlive its repair.
+_THREAD_IDENTITY_TTL_SECONDS = 0.0
 
 
 class ReportsCaches:

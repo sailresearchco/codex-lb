@@ -451,6 +451,8 @@ async def rekey_account_facets(session: AsyncSession, source_ids: list[str], tar
 
 async def remove_account_history(session: AsyncSession, account_id: str, *, delete_history: bool) -> None:
     """Bound Python state while retaining the caller's single atomic deletion."""
+    from app.modules.reports.thread_rollup import mark_thread_hours_dirty
+
     deleted_at = utcnow()
     while True:
         ids = list(
@@ -471,6 +473,7 @@ async def remove_account_history(session: AsyncSession, account_id: str, *, dele
         )
         if not ids:
             return
+        await mark_thread_hours_dirty(session, ids)
         before = await capture_contributions(session, RequestLog.id.in_(ids))
         if delete_history:
             await session.execute(delete(RequestLog).where(RequestLog.id.in_(ids)))

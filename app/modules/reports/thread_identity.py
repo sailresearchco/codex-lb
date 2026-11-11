@@ -4,13 +4,12 @@ The panel these statements feed answers one operator question: how often is a
 single thread of conversation served by more than one upstream account, and
 what does the upstream prefix cache still return while that happens.
 
-The figures are computed from raw ``request_logs`` rather than from the hourly
-report rollup on purpose. The rollup folds away per-request ordering, and a
-turn-to-turn account switch rate is defined on consecutive requests; it cannot
-be reconstructed from folded buckets. Raw scans are the expensive path, so the
-window is capped at :data:`MAX_THREAD_IDENTITY_DAYS` and every statement is
-bounded by ``requested_at`` so PostgreSQL can range-scan
-``idx_logs_requested_at_id`` instead of walking history.
+This module defines the raw reference calculation and the ordered per-request
+primitives used by the hourly thread cache. Ordinary cost rollups discard that
+ordering, so the thread cache separately retains first/last endpoints, account
+presence and qualifying account pairs. Runtime reads combine those caches with
+bounded raw edges in ``thread_rollup_read``. The report window remains capped
+at :data:`MAX_THREAD_IDENTITY_DAYS`.
 
 Splitting the same figures by affinity source (``sticky_key_source`` /
 ``sticky_kind``, landed in #2352) needs only that column added to
@@ -31,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Select, Subquery, and_, case, distinct, func, or_, select
+from sqlalchemy import ColumnElement, Select, Subquery, and_, case, distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.logs import SUCCESS_STATUS
@@ -71,7 +70,7 @@ class ThreadIdentityFacetRow:
     single_account_conversations: int = 0
 
 
-def _scoped(session: AsyncSession, start_at: datetime, end_at: datetime) -> Subquery:
+def _scoped(session: AsyncSession, start_at: datetime | ColumnElement, end_at: datetime | ColumnElement) -> Subquery:
     """Window-bounded projection carrying the thread key and its facet."""
     conversation = normalized_thread_key_expr(RequestLog.conversation_id)
     session_key = normalized_thread_key_expr(RequestLog.session_id)
@@ -104,6 +103,7 @@ def _scoped(session: AsyncSession, start_at: datetime, end_at: datetime) -> Subq
             # Whole-second epochs are enough for a ten-minute turn gap, and the
             # shared bucket helper keeps the dialect split in one place.
             _requested_at_epoch_bucket_expr(session, 1).label("requested_epoch"),
+            _requested_at_epoch_bucket_expr(session, 3600).label("requested_hour"),
             RequestLog.id.label("id"),
         )
         .where(
@@ -135,9 +135,7 @@ def _turns(scoped: Subquery) -> Subquery:
     ).subquery("thread_identity_turns")
 
 
-def per_request_stmt(scoped: Subquery) -> Select:
-    """Request volume, cache locality and turn-to-turn switches in one pass."""
-    turns = _turns(scoped)
+def turn_condition(turns: Subquery):
     # A turn needs both endpoints attributed to an account, a gap under the
     # threshold, and a measured non-shrinking prefix (a shrinking prefix is a
     # new thread reusing the key, not a continued one). Both prefix sizes must
@@ -152,7 +150,7 @@ def per_request_stmt(scoped: Subquery) -> Select:
         turns.c.previous_input_tokens.is_not(None),
         turns.c.input_tokens >= turns.c.previous_input_tokens,
     )
-    is_turn = and_(
+    return and_(
         turns.c.thread_key.is_not(None),
         turns.c.previous_epoch.is_not(None),
         turns.c.account_id.is_not(None),
@@ -168,6 +166,12 @@ def per_request_stmt(scoped: Subquery) -> Select:
         # the only thing separating two threads and it stays mandatory.
         or_(turns.c.keyed == 1, prefix_continues),
     )
+
+
+def per_request_stmt(scoped: Subquery) -> Select:
+    """Request volume, cache locality and turn-to-turn switches in one pass."""
+    turns = _turns(scoped)
+    is_turn = turn_condition(turns)
     is_cache_sample = and_(turns.c.status == SUCCESS_STATUS, turns.c.input_tokens > CACHE_MIN_INPUT_TOKENS)
     return select(
         turns.c.keyed,

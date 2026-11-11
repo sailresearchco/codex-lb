@@ -8,6 +8,7 @@ from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.reports.thread_identity import MAX_THREAD_IDENTITY_DAYS
+from app.modules.reports.thread_rollup import fold_next_thread_slice
 
 pytestmark = pytest.mark.integration
 
@@ -85,6 +86,9 @@ async def test_thread_identity_api_splits_keyed_and_unkeyed(async_client, db_set
             ]
         )
         await session.commit()
+        for _ in range(8):
+            if not await fold_next_thread_slice(session, BASE.replace(hour=0) + timedelta(days=1)):
+                break
 
     response = await async_client.get(
         "/api/reports/thread-identity",

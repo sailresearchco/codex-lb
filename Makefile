@@ -15,6 +15,9 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_reports_performance_api.py \
 	tests/integration/test_report_speed_api.py \
 	tests/integration/test_report_speed_histogram.py \
+	tests/integration/test_thread_identity_cache_migration.py \
+	tests/integration/test_thread_identity_rollup.py \
+	tests/integration/test_reports_thread_identity_api.py \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \

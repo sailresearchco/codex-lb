@@ -18,7 +18,8 @@ from app.modules.reports.filters import (
 from app.modules.reports.rollup import MEASURES
 from app.modules.reports.rollup_read import report_source
 from app.modules.reports.speed_histogram_read import SpeedHistogramResult, read_speed_histograms
-from app.modules.reports.thread_identity import ThreadIdentityFacetRow, aggregate_thread_identity
+from app.modules.reports.thread_identity import ThreadIdentityFacetRow
+from app.modules.reports.thread_rollup_read import aggregate_cached_thread_identity
 
 _SQLITE_COMPOUND_SELECT_LIMIT = 500
 MAX_DAILY_REPORT_DAYS = 730
@@ -298,7 +299,7 @@ class ReportsRepository:
         account filter would force every conversation to one account and make
         the accounts-per-conversation factor read 1.0 by construction.
         """
-        return await aggregate_thread_identity(self._session, start_at, end_at)
+        return await aggregate_cached_thread_identity(self._session, start_at, end_at)
 
     async def earliest_report_activity_at(
         self,
