@@ -49,7 +49,20 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import BigInteger, ColumnElement, Integer, Select, and_, cast, func, literal, or_, select, union_all
+from sqlalchemy import (
+    BigInteger,
+    ColumnElement,
+    Integer,
+    Select,
+    and_,
+    case,
+    cast,
+    func,
+    literal,
+    or_,
+    select,
+    union_all,
+)
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnExpressionArgument
@@ -64,6 +77,7 @@ from app.db.models import (
 )
 from app.modules.accounts.usage_time_rollup import (
     _STATE_ROW_ID,
+    DIMENSION_SENTINEL,
     HOURLY_BUCKET_SECONDS,
     QUARTER_SLOT_SECONDS,
     WARMUP_REQUEST_KINDS,
@@ -74,6 +88,7 @@ from app.modules.accounts.usage_time_rollup import (
     _requested_at_epoch_bucket_expr,
     conversation_id_expr,
     epoch_seconds,
+    to_dimension,
 )
 from app.modules.quota_planner.logic import (
     DEMAND_CACHED_INPUT_TOKEN_WEIGHT,
@@ -148,6 +163,86 @@ async def read_hourly_window(
 ) -> tuple[list[HourlyUsageRollupRow], list[RawWindow]]:
     repo = RequestUsageTimeRollupRepository(session)
     return await _read_window(repo.read_hourly, "bucket_epoch", since, until, HOURLY_BUCKET_SECONDS, filters)
+
+
+def api_key_usage_source(session: AsyncSession, key_id: str, since: datetime, until: datetime) -> CompoundSelect:
+    """Account-grouped usage from folded hours and their exact raw complement.
+
+    Every branch shares one statement snapshot, including the watermark and
+    account-deletion mirrors. The raw branches have a single effective lower
+    bound so the key/time index seeks past folded history instead of visiting
+    it and discarding rows. Missing or stale state only expands the raw read
+    within the caller's finite window.
+    """
+    lo = ceil_to_grid(since, HOURLY_BUCKET_SECONDS)
+    hi = floor_to_grid(until, HOURLY_BUCKET_SECONDS)
+    watermark = func.coalesce(
+        select(AccountUsageRollupState.hourly_folded_through)
+        .where(AccountUsageRollupState.id == _STATE_ROW_ID)
+        .scalar_subquery(),
+        literal(_EPOCH),
+    )
+    watermark_epoch = (
+        cast(func.extract("epoch", watermark), BigInteger)
+        if session.get_bind().dialect.name == "postgresql"
+        else cast(func.strftime("%s", watermark), BigInteger)
+    )
+    high = case((watermark < hi, watermark), else_=literal(hi))
+    tail_start = case((high <= lo, literal(since)), else_=high)
+    rollup = RequestUsageHourlyRollup
+    account_id = case(
+        (rollup.account_id == DIMENSION_SENTINEL, None),
+        (func.substr(rollup.account_id, 1, 1) == DIMENSION_SENTINEL, func.substr(rollup.account_id, 2)),
+        else_=rollup.account_id,
+    )
+    folded = (
+        select(
+            account_id.label("account_id"),
+            rollup.is_deleted,
+            func.sum(rollup.request_count).label("request_count"),
+            func.sum(rollup.input_tokens).label("input_tokens"),
+            func.sum(rollup.output_or_reasoning_tokens).label("output_tokens"),
+            func.sum(rollup.cached_input_tokens).label("cached_input_tokens"),
+            func.sum(rollup.cost_usd).label("cost_usd"),
+        )
+        .where(
+            rollup.bucket_epoch >= epoch_seconds(lo),
+            rollup.bucket_epoch < epoch_seconds(hi),
+            rollup.bucket_epoch < watermark_epoch,
+            rollup.api_key_id == to_dimension(key_id),
+            rollup.request_kind.not_in(WARMUP_REQUEST_KINDS),
+        )
+        .group_by(rollup.account_id, rollup.is_deleted)
+    )
+    deleted = RequestLog.deleted_at.is_not(None)
+
+    def raw(start, end, *conditions):
+        return (
+            select(
+                RequestLog.account_id,
+                deleted.label("is_deleted"),
+                func.count(RequestLog.id).label("request_count"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(
+                    func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)), 0
+                ).label("output_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+            )
+            .where(
+                RequestLog.api_key_id == key_id,
+                RequestLog.requested_at >= start,
+                RequestLog.requested_at < end,
+                RequestLog.request_kind.not_in(WARMUP_REQUEST_KINDS),
+                *conditions,
+            )
+            .group_by(RequestLog.account_id, deleted)
+        )
+
+    branches = [folded, raw(tail_start, until)]
+    if since < lo:
+        branches.append(raw(since, lo, high > lo))
+    return union_all(*branches)
 
 
 async def read_errors_window(

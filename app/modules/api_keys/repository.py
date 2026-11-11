@@ -34,7 +34,12 @@ from app.db.models import (
 from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_rollup import api_key_usage_aggregate_stmt, read_api_key_rollup_state
 from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP_REQUEST_KINDS, to_dimension
-from app.modules.accounts.usage_time_rollup_read import RawWindow, raw_windows_clause, read_hourly_window
+from app.modules.accounts.usage_time_rollup_read import (
+    RawWindow,
+    api_key_usage_source,
+    raw_windows_clause,
+    read_hourly_window,
+)
 from app.modules.api_keys.limit_windows import advance_limit_reset
 
 
@@ -1111,36 +1116,15 @@ class ApiKeysRepository:
         ]
 
     async def usage_7d(self, key_id: str, since: datetime, until: datetime) -> ApiKeyUsageTotals:
-        filtered_logs = (
-            select(
-                RequestLog.id.label("id"),
-                RequestLog.account_id.label("account_id"),
-                RequestLog.deleted_at.label("deleted_at"),
-                RequestLog.input_tokens.label("input_tokens"),
-                RequestLog.output_tokens.label("output_tokens"),
-                RequestLog.reasoning_tokens.label("reasoning_tokens"),
-                RequestLog.cached_input_tokens.label("cached_input_tokens"),
-                RequestLog.cost_usd.label("cost_usd"),
-            )
-            .where(
-                RequestLog.api_key_id == key_id,
-                RequestLog.requested_at >= since,
-                RequestLog.requested_at < until,
-                self._exclude_warmup_clause(),
-            )
-            .cte("filtered_logs")
-        )
+        filtered_logs = api_key_usage_source(self._session, key_id, since, until).cte("usage_by_account")
         usage_totals = select(
-            func.count(filtered_logs.c.id).label("total_requests"),
+            func.coalesce(func.sum(filtered_logs.c.request_count), 0).label("total_requests"),
             func.coalesce(func.sum(filtered_logs.c.input_tokens), 0).label("total_input_tokens"),
-            func.coalesce(
-                func.sum(func.coalesce(filtered_logs.c.output_tokens, filtered_logs.c.reasoning_tokens, 0)),
-                0,
-            ).label("total_output_tokens"),
+            func.coalesce(func.sum(filtered_logs.c.output_tokens), 0).label("total_output_tokens"),
             func.coalesce(func.sum(filtered_logs.c.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(filtered_logs.c.cost_usd), 0.0).label("total_cost_usd"),
         ).cte("usage_totals")
-        deleted_expr = func.coalesce(filtered_logs.c.deleted_at.is_not(None), False)
+        deleted_expr = filtered_logs.c.is_deleted
         usage_grouped = (
             select(
                 filtered_logs.c.account_id.label("account_id"),
