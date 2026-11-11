@@ -57,10 +57,24 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import astuple, dataclass, replace
+from dataclasses import astuple, dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import BigInteger, ColumnElement, Integer, and_, case, cast, delete, func, insert, select, true, update
+from sqlalchemy import (
+    BigInteger,
+    ColumnElement,
+    Integer,
+    and_,
+    case,
+    cast,
+    delete,
+    func,
+    insert,
+    literal,
+    select,
+    true,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import SQLCoreOperations
 
@@ -318,10 +332,9 @@ def _merge_rows(rows: Iterable, key_width: int, columns: tuple[str, ...], row_ty
 
 # Rows per multi-VALUES upsert statement. asyncpg rejects statements with
 # more than 32,767 bind parameters; at 18 columns (the widest table) 1,000
-# rows binds 18,000 — comfortable margin on both dialects. Lifecycle mirrors
-# rekey an account's ENTIRE folded history in one call (thousands of rows
-# for a long-lived account), so unchunked upserts would abort the whole
-# lifecycle transaction.
+# rows binds 18,000 — comfortable margin on both dialects. Repository
+# callers can add thousands of buckets at once; lifecycle rekeys instead
+# aggregate and merge-add directly in SQL.
 _UPSERT_CHUNK_ROWS = 1_000
 
 
@@ -362,7 +375,7 @@ class RequestUsageTimeRollupRepository:
     async def add_hourly(self, rows: Sequence[HourlyUsageRollupRow]) -> None:
         """Merge-add hourly rows: inserts new (bucket, dimensions) rows and
         adds measures onto existing ones, in bounded statement chunks. Used
-        by lifecycle mirrors and tests; the fold pass itself writes via
+        by repository callers and tests; the fold pass itself writes via
         DELETE-then-INSERT..SELECT."""
         await _merge_add(
             self._session,
@@ -978,28 +991,50 @@ async def _advance_conversation_watermark(session: AsyncSession, value: datetime
 # transaction, so a mirror can never interleave with an in-flight fold slice.
 
 _ROLLUP_TABLES = (
-    (RequestUsageHourlyRollup, _HOURLY_KEY_COLUMNS + _HOURLY_MEASURE_COLUMNS, HourlyUsageRollupRow, "add_hourly"),
-    (RequestUsageHourlyErrorRollup, _ERROR_KEY_COLUMNS + _ERROR_MEASURE_COLUMNS, HourlyErrorRollupRow, "add_errors"),
-    (RequestDemandQuarterRollup, _QUARTER_KEY_COLUMNS + _QUARTER_MEASURE_COLUMNS, QuarterDemandRollupRow, "add_demand"),
-    (
-        RequestConversationHourlyRollup,
-        _CONVERSATION_KEY_COLUMNS + _CONVERSATION_MEASURE_COLUMNS,
-        ConversationHourlyRollupRow,
-        "add_conversations",
-    ),
+    (RequestUsageHourlyRollup, _HOURLY_KEY_COLUMNS, _HOURLY_MEASURE_COLUMNS),
+    (RequestUsageHourlyErrorRollup, _ERROR_KEY_COLUMNS, _ERROR_MEASURE_COLUMNS),
+    (RequestDemandQuarterRollup, _QUARTER_KEY_COLUMNS, _QUARTER_MEASURE_COLUMNS),
+    (RequestConversationHourlyRollup, _CONVERSATION_KEY_COLUMNS, _CONVERSATION_MEASURE_COLUMNS),
 )
 
 
-async def _rekey_account_rows(session: AsyncSession, account_ids: list[str], rekey) -> None:
-    repo = RequestUsageTimeRollupRepository(session)
+async def _rekey_account_rows(
+    session: AsyncSession,
+    account_ids: list[str],
+    target_account_id: str | None,
+    *,
+    mark_deleted: bool = False,
+) -> None:
     stored_ids = [to_dimension(account_id) for account_id in account_ids]
-    for model, columns, row_type, adder in _ROLLUP_TABLES:
-        stmt = select(*(getattr(model, column) for column in columns)).where(model.account_id.in_(stored_ids))
-        rows = [row_type(*row) for row in (await session.execute(stmt)).all()]
-        if not rows:
-            continue
-        await session.execute(delete(model).where(model.account_id.in_(stored_ids)))
-        await getattr(repo, adder)([rekey(row) for row in rows])
+    target = to_dimension(target_account_id)
+    if target in stored_ids:
+        raise ValueError("Rollup rekey target must not be a source account")
+    for model, keys, measures in _ROLLUP_TABLES:
+        source = model.account_id.in_(stored_ids)
+        moved: dict[str, ColumnElement] = {"account_id": literal(target)}
+        if mark_deleted and "is_deleted" in keys:
+            moved["is_deleted"] = literal(True)
+        # Source accounts and live/deleted keys can collapse to one target.
+        # Aggregate first so PostgreSQL updates each conflict target once,
+        # without materializing the account's retained rollups in Python.
+        rows = (
+            select(
+                *(moved[name] if name in moved else getattr(model, name) for name in keys),
+                *(func.sum(getattr(model, name)) for name in measures),
+            )
+            .where(source)
+            .group_by(*(getattr(model, name) for name in keys if name not in moved))
+        )
+        stmt = _insert_fn(session)(model).from_select([*keys, *measures], rows)
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=list(keys),
+                set_={name: getattr(model, name) + getattr(stmt.excluded, name) for name in measures},
+            )
+        )
+        # The caller holds the fold lock and owns this transaction. The
+        # disjoint target survives source deletion; rollback undoes both.
+        await session.execute(delete(model).where(source))
 
 
 async def mirror_account_soft_delete_into_time_rollups(session: AsyncSession, account_id: str) -> None:
@@ -1016,12 +1051,7 @@ async def mirror_account_soft_delete_into_time_rollups(session: AsyncSession, ac
     it while the reports reads (which include them) keep it.
     """
 
-    def _rekey(row):
-        if isinstance(row, HourlyErrorRollupRow):
-            return replace(row, account_id=DIMENSION_SENTINEL)
-        return replace(row, account_id=DIMENSION_SENTINEL, is_deleted=True)
-
-    await _rekey_account_rows(session, [account_id], _rekey)
+    await _rekey_account_rows(session, [account_id], None, mark_deleted=True)
     from app.modules.reports.rollup import rekey_report_accounts
 
     await rekey_report_accounts(session, [account_id], None)
@@ -1064,5 +1094,4 @@ async def merge_time_rollups_into(session: AsyncSession, canonical_account_id: s
     from app.modules.reports.speed_histogram import rekey_speed_histogram_accounts
 
     await rekey_speed_histogram_accounts(session, duplicate_ids, canonical_account_id)
-    canonical_dimension = to_dimension(canonical_account_id)
-    await _rekey_account_rows(session, duplicate_ids, lambda row: replace(row, account_id=canonical_dimension))
+    await _rekey_account_rows(session, duplicate_ids, canonical_account_id)
