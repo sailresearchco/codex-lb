@@ -293,3 +293,27 @@ The Auth Guardian scheduler is the one exception to the escape hatch: because it
 - **THEN** the pass performs no refresh work
 - **AND** a warning log states that the guardian is disabled because the ring runs without leader election
 
+### Requirement: Bounded report backfills continue cooperatively
+
+Speed histogram and thread identity backfills SHALL each run an independently owned scheduler loop under the heartbeat-renewed leader gate and shared usage-fold lock. A pass that commits its full slice allowance SHALL release the lock and wait one second before attempting another bounded pass. A partial pass, no progress, lack of leadership, or failure SHALL retain the normal fold interval. Catch-up in one backfill SHALL NOT accelerate failed or caught-up backfills or the other periodic usage folds. The existing per-pass and per-transaction work limits SHALL remain unchanged.
+
+#### Scenario: More history remains than one pass can fold
+
+- **GIVEN** a report backfill requires more than its eight-slice allowance
+- **WHEN** it commits a full pass
+- **THEN** it releases the shared lock and retries after the cooperative delay rather than the fifteen-minute interval
+- **AND** other periodic folds retain their normal cadence
+
+#### Scenario: One backfill fails while another makes progress
+
+- **WHEN** one report backfill fails and the other commits its full allowance
+- **THEN** the successful backfill continues after the cooperative delay
+- **AND** the failed backfill waits for its normal interval before retrying
+
+#### Scenario: Scheduler stops with active and queued backfill work
+
+- **WHEN** the usage scheduler stops
+- **THEN** every owned scheduler loop is cancelled and awaited before a failed loop's error is surfaced
+- **AND** cancellation and leadership loss retain the leader gate's existing bounded-drain and detached-body ownership contract
+- **AND** restarting the scheduler creates only one loop per backfill
+
