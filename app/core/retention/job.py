@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from app.core.config.settings_cache import get_settings_cache
 from app.core.utils.time import utcnow
@@ -115,6 +115,7 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                             AccountUsageRollupState.hourly_folded_through,
                             AccountUsageRollupState.conversation_folded_through,
                             AccountUsageRollupState.reports_folded_through,
+                            AccountUsageRollupState.speed_folded_through,
                         )
                         .where(AccountUsageRollupState.id == 1)
                         .with_for_update()
@@ -145,13 +146,37 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                     .limit(BATCH_SIZE)
                 )
                 ids = list((await session.scalars(batch_ids)).all())
+                deleted = 0
+                pruned_through: datetime | None = None
                 for start in range(0, len(ids), 500):
                     chunk = ids[start : start + 500]
                     before = await capture_contributions(session, RequestLog.id.in_(chunk))
-                    await session.execute(delete(RequestLog).where(RequestLog.id.in_(chunk)))
+                    removed = list(
+                        (
+                            await session.scalars(
+                                delete(RequestLog).where(RequestLog.id.in_(chunk)).returning(RequestLog.requested_at)
+                            )
+                        ).all()
+                    )
+                    deleted += len(removed)
+                    if removed:
+                        newest_removed = max(removed)
+                        pruned_through = max(pruned_through, newest_removed) if pruned_through else newest_removed
                     await subtract_contributions(session, before)
+                if pruned_through is not None:
+                    # Keep the actual inclusive deletion frontier in this
+                    # transaction. Late inserts can move raw MIN backwards;
+                    # pruning them must not rewind proof of earlier loss.
+                    frontier = AccountUsageRollupState.request_logs_pruned_through
+                    await session.execute(
+                        update(AccountUsageRollupState)
+                        .where(
+                            AccountUsageRollupState.id == 1,
+                            frontier.is_(None) | (frontier < pruned_through),
+                        )
+                        .values(request_logs_pruned_through=pruned_through)
+                    )
                 await session.commit()
-        deleted = len(ids)
         total += deleted
         if deleted < BATCH_SIZE:
             return total

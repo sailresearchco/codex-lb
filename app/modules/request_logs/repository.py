@@ -43,7 +43,7 @@ from app.db.models import (
     RequestUsageHourlyRollup,
 )
 from app.db.session import relax_commit_durability, sqlite_writer_section
-from app.modules.accounts.usage_rollup import lock_fold_state
+from app.modules.accounts.usage_rollup import FOLD_LAG, lock_fold_state
 from app.modules.accounts.usage_time_rollup import (
     DIMENSION_SENTINEL,
     HOURLY_BUCKET_SECONDS,
@@ -1068,11 +1068,18 @@ class RequestLogsRepository:
             insert_values = {key: getattr(log, key) for key in _REQUEST_LOG_INSERT_COLUMN_KEYS}
             summary_contributions = contributions_from_logs([log])
             try:
+                late_append = requested_at is not None and requested_at < utcnow() - FOLD_LAG
+                if late_append:
+                    await lock_fold_state(self._session)
                 result = typing_cast(
                     CursorResult[Any],
                     await self._session.execute(insert(RequestLog).values(insert_values)),
                 )
                 inserted_primary_key = result.inserted_primary_key
+                if late_append:
+                    from app.modules.reports.speed_histogram import fold_late_speed_log
+
+                    await fold_late_speed_log(self._session, log)
                 if inserted_primary_key is not None and inserted_primary_key[0] is not None:
                     log.id = int(inserted_primary_key[0])
                     make_transient_to_detached(log)
@@ -1143,6 +1150,7 @@ class RequestLogsRepository:
                             AccountUsageRollupState.folded_through,
                             AccountUsageRollupState.hourly_folded_through,
                             AccountUsageRollupState.reports_folded_through,
+                            AccountUsageRollupState.speed_folded_through,
                         ).where(AccountUsageRollupState.id == 1)
                     )
                 ).first()
@@ -1158,11 +1166,12 @@ class RequestLogsRepository:
                     # convention: the lifetime fold is `(start, end]`
                     # (inclusive end — a row AT the watermark is folded), the
                     # hourly and report folds are `[start, end)`.
-                    folded_through, hourly_folded_through, reports_folded_through = watermarks
+                    folded_through, hourly_folded_through, reports_folded_through, speed_folded_through = watermarks
                     stmt = stmt.where(
                         RequestLog.requested_at > folded_through,
                         RequestLog.requested_at >= hourly_folded_through,
                         RequestLog.requested_at >= reports_folded_through,
+                        RequestLog.requested_at >= speed_folded_through,
                     )
                 result_rows = await self._session.execute(stmt)
                 logs = list(result_rows.scalars())

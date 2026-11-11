@@ -202,6 +202,7 @@ async def test_retention_repairs_extrema_and_reused_rowid_is_included_once(async
                 hourly_folded_through=now,
                 conversation_folded_through=now,
                 reports_folded_through=now,
+                speed_folded_through=now,
             )
         )
         await session.commit()

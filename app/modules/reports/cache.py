@@ -29,11 +29,14 @@ class ReportCacheKey:
 
 
 class ReportCache[K: Hashable, T]:
-    def __init__(self, *, ttl_seconds: float = 60, max_entries: int = 64) -> None:
+    def __init__(
+        self, *, ttl_seconds: float = 60, max_entries: int = 64, cache_if: Callable[[T], bool] | None = None
+    ) -> None:
         self._ttl = ttl_seconds
         self._capacity = max_entries
         self._entries: OrderedDict[K, tuple[float, T]] = OrderedDict()
         self._compute_slot = asyncio.Semaphore(1)
+        self._cache_if = cache_if
 
     def _cached(self, key: K) -> tuple[float, T] | None:
         # All state access runs synchronously on the application's event loop.
@@ -58,6 +61,8 @@ class ReportCache[K: Hashable, T]:
             if cached is not None:
                 return cached[1]
             value = await compute()
+            if self._cache_if is not None and not self._cache_if(value):
+                return value
             self._entries[key] = (monotonic() + self._ttl, value)
             while len(self._entries) > self._capacity:
                 self._entries.popitem(last=False)
@@ -73,7 +78,9 @@ _THREAD_IDENTITY_TTL_SECONDS = 300.0
 class ReportsCaches:
     def __init__(self) -> None:
         self.reports = ReportCache[ReportCacheKey, ReportsResponse]()
-        self.speeds = ReportCache[ReportCacheKey, ReportSpeedResponse](ttl_seconds=300)
+        self.speeds = ReportCache[ReportCacheKey, ReportSpeedResponse](
+            ttl_seconds=300, cache_if=lambda response: response.available
+        )
         self.options = ReportCache[ReportCacheKey, ReportsOptionsResponse]()
         self.thread_identity = ReportCache[ReportCacheKey, ThreadIdentityResponse](
             ttl_seconds=_THREAD_IDENTITY_TTL_SECONDS

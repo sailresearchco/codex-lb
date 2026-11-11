@@ -77,4 +77,20 @@ describe("QueueWaitChart", () => {
       { date: "07-16", queue: 0 },
     ]);
   });
+
+  it("distinguishes missing samples from a measured zero", () => {
+    render(
+      <QueueWaitChart
+        startDate="2026-07-14"
+        endDate="2026-07-16"
+        data={[
+          { ...BASE_ROW, date: "2026-07-14", medianQueueMs: 0 },
+          { ...BASE_ROW, date: "2026-07-15", medianQueueMs: 90 },
+        ]}
+        sampleCounts={{ "2026-07-14": 3, "2026-07-15": 0 }}
+      />,
+    );
+
+    expect((capturedProps?.data as { queue: number | null }[]).map((row) => row.queue)).toEqual([0, null, null]);
+  });
 });

@@ -1025,12 +1025,17 @@ async def mirror_account_soft_delete_into_time_rollups(session: AsyncSession, ac
     from app.modules.reports.rollup import rekey_report_accounts
 
     await rekey_report_accounts(session, [account_id], None)
+    from app.modules.reports.speed_histogram import rekey_speed_histogram_accounts
+
+    await rekey_speed_histogram_accounts(session, [account_id], None)
 
 
 async def mirror_account_hard_delete_into_time_rollups(session: AsyncSession, account_id: str) -> None:
     """Mirror the history-deleting path (raw rows physically removed)."""
     from app.db.models import RequestReportHourlyRollup
+    from app.modules.reports.speed_histogram import delete_speed_histogram_account
 
+    await delete_speed_histogram_account(session, account_id)
     await session.execute(
         delete(RequestReportHourlyRollup).where(RequestReportHourlyRollup.account_id == to_dimension(account_id))
     )
@@ -1050,5 +1055,8 @@ async def merge_time_rollups_into(session: AsyncSession, canonical_account_id: s
     from app.modules.reports.rollup import rekey_report_accounts
 
     await rekey_report_accounts(session, duplicate_ids, canonical_account_id)
+    from app.modules.reports.speed_histogram import rekey_speed_histogram_accounts
+
+    await rekey_speed_histogram_accounts(session, duplicate_ids, canonical_account_id)
     canonical_dimension = to_dimension(canonical_account_id)
     await _rekey_account_rows(session, duplicate_ids, lambda row: replace(row, account_id=canonical_dimension))

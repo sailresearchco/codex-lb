@@ -18,21 +18,22 @@ export type TimeToFirstTokenChartProps = {
   startDate: string;
   endDate: string;
   data: DailyReportRow[];
+  sampleCounts?: Record<string, number>;
 };
 
 function formatSeconds(value: number): string {
   return `${(value / 1000).toFixed(1)}s`;
 }
 
-export function TimeToFirstTokenChart({ startDate, endDate, data }: TimeToFirstTokenChartProps) {
+export function TimeToFirstTokenChart({ startDate, endDate, data, sampleCounts }: TimeToFirstTokenChartProps) {
   const { t } = useTranslation();
   const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
-    ttft: d.medianTtftMs ?? 0,
+    ttft: sampleCounts && !sampleCounts[d.date] ? null : d.medianTtftMs ?? 0,
   }));
 
   return (
-    <ReportChartCard title={t("reports.charts.timeToFirstToken")} empty={data.length === 0}>
+    <ReportChartCard title={t("reports.charts.timeToFirstToken")} empty={data.length === 0 || !chartData.some((row) => row.ttft !== null)}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
             <defs>

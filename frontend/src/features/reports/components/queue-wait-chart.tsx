@@ -18,6 +18,7 @@ export type QueueWaitChartProps = {
   startDate: string;
   endDate: string;
   data: DailyReportRow[];
+  sampleCounts?: Record<string, number>;
 };
 
 function formatQueueMs(value: number): string {
@@ -27,15 +28,15 @@ function formatQueueMs(value: number): string {
   return `${Math.round(value)}ms`;
 }
 
-export function QueueWaitChart({ startDate, endDate, data }: QueueWaitChartProps) {
+export function QueueWaitChart({ startDate, endDate, data, sampleCounts }: QueueWaitChartProps) {
   const { t } = useTranslation();
   const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
-    queue: d.medianQueueMs ?? 0,
+    queue: sampleCounts && !sampleCounts[d.date] ? null : d.medianQueueMs ?? 0,
   }));
 
   return (
-    <ReportChartCard title={t("reports.charts.queueWait")} empty={data.length === 0}>
+    <ReportChartCard title={t("reports.charts.queueWait")} empty={data.length === 0 || !chartData.some((row) => row.queue !== null)}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
             <defs>

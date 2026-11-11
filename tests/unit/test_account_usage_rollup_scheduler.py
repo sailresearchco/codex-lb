@@ -17,6 +17,7 @@ def report_fold(monkeypatch):
     fold = AsyncMock(return_value=0)
     monkeypatch.setattr(rollup_scheduler, "run_report_fold_pass", fold)
     monkeypatch.setattr(rollup_scheduler, "run_conversation_fold_pass", AsyncMock(return_value=0))
+    monkeypatch.setattr(rollup_scheduler, "run_speed_histogram_fold_pass", AsyncMock(return_value=0))
     monkeypatch.setattr(rollup_scheduler, "run_conversation_summary_pass", AsyncMock(return_value=0))
     return fold
 

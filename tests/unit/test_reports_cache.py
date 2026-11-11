@@ -7,10 +7,22 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.modules.reports.cache import ReportCache, ReportCacheKey
+from app.modules.reports.cache import ReportCache, ReportCacheKey, ReportsCaches
+from app.modules.reports.schemas import ReportSpeedResponse
 
 pytestmark = pytest.mark.unit
 KEY = ReportCacheKey(date(2026, 1, 1), date(2026, 1, 7), "UTC", (), (), "", "")
+
+
+async def test_speed_building_result_does_not_hide_newly_completed_backfill():
+    cache = ReportsCaches().speeds
+    pending = ReportSpeedResponse(available=False, max_days=7, unavailable_reason="building")
+    ready = ReportSpeedResponse(available=True, max_days=7)
+    compute = AsyncMock(side_effect=[pending, ready])
+    assert not (await cache.get(KEY, compute)).available
+    assert (await cache.get(KEY, compute)).available
+    assert (await cache.get(KEY, compute)).available
+    assert compute.await_count == 2
 
 
 async def test_cache_coalesces_identical_loads_and_isolates_filter_keys():

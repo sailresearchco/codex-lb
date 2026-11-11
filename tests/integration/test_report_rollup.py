@@ -316,7 +316,11 @@ async def test_retention_waits_for_report_watermark(db_setup):
     async with SessionLocal() as session:
         session.add(
             AccountUsageRollupState(
-                id=1, folded_through=END, hourly_folded_through=END, conversation_folded_through=END
+                id=1,
+                folded_through=END,
+                hourly_folded_through=END,
+                conversation_folded_through=END,
+                speed_folded_through=END,
             )
         )
         await session.commit()

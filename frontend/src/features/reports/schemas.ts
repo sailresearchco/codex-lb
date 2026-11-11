@@ -87,14 +87,30 @@ export const ReportsResponseSchema = z.object({
   byAccount: z.array(AccountCostEntrySchema),
 });
 
+const SpeedMedianBoundsSchema = z.object({
+  sampleCount: z.number(),
+  lowerBound: z.number().nullable(),
+  upperBound: z.number().nullable(),
+  relativeErrorBound: z.number().nullable(),
+  clipped: z.boolean(),
+});
+
 export const ReportSpeedResponseSchema = z.object({
+  generatedAt: z.string().optional(),
   available: z.boolean(),
   maxDays: z.number(),
+  approximate: z.boolean().optional(),
+  unavailableReason: z.enum(["range_too_large", "building", "raw_history_pruned"]).nullable().optional(),
+  coverageFrom: z.string().nullable().optional(),
+  foldedThrough: z.string().nullable().optional(),
   daily: z.array(z.object({
     date: z.string(),
     medianTtftMs: z.number(),
     medianTps: z.number(),
     medianQueueMs: z.number(),
+    ttft: SpeedMedianBoundsSchema.optional(),
+    tps: SpeedMedianBoundsSchema.optional(),
+    queue: SpeedMedianBoundsSchema.optional(),
   })),
 });
 
@@ -133,5 +149,6 @@ export type AccountCostEntry = z.infer<typeof AccountCostEntrySchema>;
 export type ReportSummary = z.infer<typeof ReportSummarySchema>;
 export type ReportComparison = z.infer<typeof ReportComparisonSchema>;
 export type ReportsResponse = z.infer<typeof ReportsResponseSchema>;
+export type ReportSpeedResponse = z.infer<typeof ReportSpeedResponseSchema>;
 export type ThreadIdentityFacet = z.infer<typeof ThreadIdentityFacetSchema>;
 export type ThreadIdentityResponse = z.infer<typeof ThreadIdentityResponseSchema>;

@@ -22,10 +22,12 @@ from app.modules.reports.schemas import (
     ReportSpeedResponse,
     ReportsResponse,
     ReportSummary,
+    SpeedMedianBounds,
     ThreadIdentityFacet,
     ThreadIdentityResponse,
     UserAgentCostEntry,
 )
+from app.modules.reports.speed_histogram import HistogramMedian
 from app.modules.reports.thread_identity import (
     CACHE_MIN_INPUT_TOKENS,
     CONVERSATION_MIN_REQUESTS,
@@ -192,25 +194,30 @@ class ReportsService:
         api_key_ids: list[str] | None = None,
     ) -> ReportSpeedResponse:
         start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
-        available = (end_date - start_date).days + 1 <= MAX_SPEED_REPORT_DAYS
-        rows = (
-            await self._repository.aggregate_daily_speeds(
-                start_date, end_date, timezone_info, account_ids, model, useragent_group, api_key_ids
+        if (end_date - start_date).days + 1 > MAX_SPEED_REPORT_DAYS:
+            return ReportSpeedResponse(
+                available=False, max_days=MAX_SPEED_REPORT_DAYS, unavailable_reason="range_too_large"
             )
-            if available
-            else []
+        result = await self._repository.aggregate_daily_speeds(
+            start_date, end_date, timezone_info, account_ids, model, useragent_group, api_key_ids
         )
         return ReportSpeedResponse(
-            available=available,
+            available=result.available,
             max_days=MAX_SPEED_REPORT_DAYS,
+            unavailable_reason=result.reason,
+            coverage_from=result.coverage_from.replace(tzinfo=timezone.utc) if result.coverage_from else None,
+            folded_through=result.folded_through.replace(tzinfo=timezone.utc),
             daily=[
                 DailySpeedRow(
                     date=row.date,
-                    median_ttft_ms=round(row.median_ttft_ms, 2),
-                    median_tps=round(row.median_tps, 2),
-                    median_queue_ms=round(row.median_queue_ms, 2),
+                    median_ttft_ms=row.ttft.value,
+                    median_tps=row.tps.value,
+                    median_queue_ms=row.queue.value,
+                    ttft=_speed_bounds(row.ttft),
+                    tps=_speed_bounds(row.tps),
+                    queue=_speed_bounds(row.queue),
                 )
-                for row in rows
+                for row in result.daily
             ],
         )
 
@@ -334,4 +341,14 @@ def _thread_identity_facet(
         cache_hit_ratio=_ratio(row.cache_cached_input_tokens, row.cache_input_tokens),
         cache_sample_input_tokens=row.cache_input_tokens,
         thread_grouping_approximate=approximate,
+    )
+
+
+def _speed_bounds(value: HistogramMedian) -> SpeedMedianBounds:
+    return SpeedMedianBounds(
+        sample_count=value.sample_count,
+        lower_bound=value.lower_bound,
+        upper_bound=value.upper_bound,
+        relative_error_bound=value.relative_error_bound,
+        clipped=value.clipped,
     )
