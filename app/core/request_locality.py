@@ -441,6 +441,19 @@ def _parse_host_header_hostname(host_header: str | None) -> str | None:
     return value
 
 
+def is_direct_local_request(request: HTTPConnection) -> bool:
+    socket_ip = raw_socket_peer_host(request)
+    if socket_ip is None or _has_forwarded_client_ip_hint(request.headers):
+        return False
+    host_name = _parse_host_header_hostname(request.headers.get("host"))
+    if not host_name or not is_local_host(host_name):
+        return False
+    try:
+        return ip_address(socket_ip).is_loopback
+    except ValueError:
+        return False
+
+
 def is_local_request(request: HTTPConnection) -> bool:
     if _is_test_server_request(request):
         return True

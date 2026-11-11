@@ -3,6 +3,21 @@
 ## Purpose
 Ordered process drain: a pre-connection barrier, WebSocket admission closure, and finalization of active turns so shutdown never strands in-flight work or settlement.
 ## Requirements
+### Requirement: Internal drain routes require proven local access
+
+The internal drain start, stop, and status routes MUST require a captured loopback raw socket peer, a local Host, and no forwarded client-IP hints. A projected loopback client address alone MUST NOT authorize drain access. Missing raw socket provenance, a public Host, or a forwarded client-IP hint MUST fail closed. Direct loopback requests using a local Host MUST retain drain access regardless of proxy-trust configuration. Dashboard bootstrap locality policy SHALL remain unchanged.
+
+#### Scenario: External request projects a loopback client
+
+- **WHEN** an external raw peer supplies a forwarded loopback address accepted by proxy projection
+- **THEN** every internal drain route returns HTTP 403
+- **AND** process drain state remains unchanged
+
+#### Scenario: Direct local operator drains and resumes
+
+- **WHEN** a direct loopback client uses a local Host without forwarded client hints
+- **THEN** it can start, inspect, and stop a reversible drain
+
 ### Requirement: Process shutdown establishes a pre-connection drain barrier
 
 The project-owned Uvicorn server MUST commit graceful drain before Uvicorn closes HTTP or WebSocket connections. A deadline-bearing preStop request or the first shutdown transition MUST establish one monotonic application drain deadline; later SIGTERM, shutdown, or lifespan transitions MUST reuse that deadline without extending it. A delayed preStop request MAY tighten a signal-committed deadline only to preserve the earlier absolute deadline carried by that request. A headerless operator drain MUST remain reversible. Once process shutdown is committed, operator actions MUST NOT reopen admission or erase its deadline.

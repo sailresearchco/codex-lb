@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from datetime import timedelta
 from hashlib import sha256
-from ipaddress import ip_address
 
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select as sa_select
@@ -11,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
+from app.core.request_locality import is_direct_local_request
 from app.core.shutdown import DRAIN_DEADLINE_HEADER
 from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
@@ -19,18 +19,6 @@ from app.modules.health.schemas import BridgeRingInfo, HealthCheckResponse, Heal
 from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
 
 router = APIRouter(tags=["health"])
-
-
-def _is_internal_client_host(client_host: str | None) -> bool:
-    if client_host in {"localhost"}:
-        return True
-    if client_host is None:
-        return False
-    try:
-        address = ip_address(client_host)
-    except ValueError:
-        return False
-    return address.is_loopback
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -94,8 +82,7 @@ async def health_ready() -> HealthCheckResponse:
 
 @router.post("/internal/drain/start", include_in_schema=False)
 async def start_internal_drain(request: Request) -> HealthCheckResponse:
-    client_host = request.client.host if request.client is not None else None
-    if not _is_internal_client_host(client_host):
+    if not is_direct_local_request(request):
         raise HTTPException(status_code=403, detail="Internal access required")
 
     import app.core.shutdown as shutdown_state
@@ -135,8 +122,7 @@ async def start_internal_drain(request: Request) -> HealthCheckResponse:
 
 @router.post("/internal/drain/stop", include_in_schema=False)
 async def stop_internal_drain(request: Request) -> HealthCheckResponse:
-    client_host = request.client.host if request.client is not None else None
-    if not _is_internal_client_host(client_host):
+    if not is_direct_local_request(request):
         raise HTTPException(status_code=403, detail="Internal access required")
 
     import app.core.shutdown as shutdown_state
@@ -149,8 +135,7 @@ async def stop_internal_drain(request: Request) -> HealthCheckResponse:
 
 @router.get("/internal/drain/status", include_in_schema=False)
 async def internal_drain_status(request: Request) -> HealthCheckResponse:
-    client_host = request.client.host if request.client is not None else None
-    if not _is_internal_client_host(client_host):
+    if not is_direct_local_request(request):
         raise HTTPException(status_code=403, detail="Internal access required")
 
     import app.core.shutdown as shutdown_state

@@ -2,14 +2,30 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy.exc import OperationalError
+from starlette.types import Scope
 
 pytestmark = pytest.mark.unit
+
+
+def _drain_request(request: SimpleNamespace) -> Request:
+    from app.core.socket_peer import _capture_raw_socket_peer
+
+    headers = {"host": "localhost", **getattr(request, "headers", {})}
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/internal/drain/start",
+        "headers": [(name.encode(), value.encode()) for name, value in headers.items()],
+        "client": (request.client.host, 12345),
+        "app": getattr(request, "app", SimpleNamespace(state=SimpleNamespace(proxy_service=None))),
+    }
+    _capture_raw_socket_peer(scope)
+    return Request(scope)
 
 
 def _bridge_ring_ok():
@@ -378,7 +394,7 @@ async def test_internal_drain_start_sets_draining_and_marks_bridge_sessions():
             return_value=SimpleNamespace(shutdown_drain_timeout_seconds=30),
         ),
     ):
-        response = await start_internal_drain(cast(Any, request))
+        response = await start_internal_drain(_drain_request(request))
 
     begin_drain.assert_called_once_with(timeout_seconds=30)
     proxy_service.mark_http_bridge_draining.assert_awaited_once()
@@ -408,7 +424,7 @@ async def test_internal_drain_start_uses_hook_deadline_without_extension() -> No
             return_value=SimpleNamespace(shutdown_drain_timeout_seconds=30),
         ),
     ):
-        response = await start_internal_drain(cast(Any, request))
+        response = await start_internal_drain(_drain_request(request))
         assert shutdown_state.remaining_drain_timeout_seconds() == 8
         assert shutdown_state.commit_shutdown(timeout_seconds=30) == 110
 
@@ -421,7 +437,7 @@ async def test_internal_drain_start_uses_hook_deadline_without_extension() -> No
     assert shutdown_state.is_shutdown_committed() is True
 
     with pytest.raises(HTTPException) as exc_info:
-        await stop_internal_drain(cast(Any, request))
+        await stop_internal_drain(_drain_request(request))
     assert exc_info.value.status_code == 409
 
 
@@ -437,7 +453,7 @@ async def test_internal_drain_start_rejects_invalid_hook_deadline() -> None:
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await start_internal_drain(cast(Any, request))
+        await start_internal_drain(_drain_request(request))
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "Invalid drain deadline"
@@ -464,8 +480,8 @@ async def test_headerless_internal_drain_remains_reversible() -> None:
             return_value=SimpleNamespace(shutdown_drain_timeout_seconds=30),
         ),
     ):
-        response = await start_internal_drain(cast(Any, request))
-        stopped = await stop_internal_drain(cast(Any, request))
+        response = await start_internal_drain(_drain_request(request))
+        stopped = await stop_internal_drain(_drain_request(request))
 
     assert response.checks == {
         "draining": "true",
@@ -504,7 +520,7 @@ async def test_deadline_drain_commit_survives_route_cancellation() -> None:
             return_value=SimpleNamespace(shutdown_drain_timeout_seconds=30),
         ),
     ):
-        start_task = asyncio.create_task(start_internal_drain(cast(Any, request)))
+        start_task = asyncio.create_task(start_internal_drain(_drain_request(request)))
         await asyncio.wait_for(bridge_mark_started.wait(), timeout=1)
         start_task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -525,7 +541,7 @@ async def test_internal_drain_start_rejects_non_loopback_clients():
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await start_internal_drain(cast(Any, request))
+        await start_internal_drain(_drain_request(request))
 
     assert exc_info.value.status_code == 403
 
@@ -537,7 +553,7 @@ async def test_internal_drain_stop_clears_draining_flags():
     request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
 
     with patch("app.core.shutdown.stop_drain", return_value=True) as stop_drain:
-        response = await stop_internal_drain(cast(Any, request))
+        response = await stop_internal_drain(_drain_request(request))
 
     stop_drain.assert_called_once_with()
     assert response.status == "ok"
@@ -552,7 +568,7 @@ async def test_internal_drain_stop_rejects_committed_process_shutdown():
 
     with patch("app.core.shutdown.stop_drain", return_value=False):
         with pytest.raises(HTTPException) as exc_info:
-            await stop_internal_drain(cast(Any, request))
+            await stop_internal_drain(_drain_request(request))
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail == "Process shutdown is already committed"
@@ -565,7 +581,7 @@ async def test_internal_drain_stop_rejects_non_loopback_clients():
     request = SimpleNamespace(client=SimpleNamespace(host="8.8.8.8"))
 
     with pytest.raises(HTTPException) as exc_info:
-        await stop_internal_drain(cast(Any, request))
+        await stop_internal_drain(_drain_request(request))
 
     assert exc_info.value.status_code == 403
 
@@ -580,7 +596,7 @@ async def test_internal_drain_start_rejects_private_network_clients():
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await start_internal_drain(cast(Any, request))
+        await start_internal_drain(_drain_request(request))
 
     assert exc_info.value.status_code == 403
 
@@ -596,7 +612,7 @@ async def test_internal_drain_status_reports_shutdown_state():
         patch("app.core.shutdown.is_bridge_drain_active", return_value=True),
         patch("app.core.shutdown.get_in_flight", return_value=2),
     ):
-        response = await internal_drain_status(cast(Any, request))
+        response = await internal_drain_status(_drain_request(request))
 
     assert response.status == "ok"
     assert response.checks == {
@@ -632,7 +648,7 @@ async def test_internal_drain_status_reports_bridge_activity():
         patch("app.core.shutdown.is_bridge_drain_active", return_value=False),
         patch("app.core.shutdown.get_in_flight", return_value=0),
     ):
-        response = await internal_drain_status(cast(Any, request))
+        response = await internal_drain_status(_drain_request(request))
 
     assert response.checks is not None
     assert response.checks["http_bridge_live_sessions"] == "2"
@@ -649,6 +665,6 @@ async def test_internal_drain_status_rejects_non_loopback_clients():
     request = SimpleNamespace(client=SimpleNamespace(host="8.8.8.8"))
 
     with pytest.raises(HTTPException) as exc_info:
-        await internal_drain_status(cast(Any, request))
+        await internal_drain_status(_drain_request(request))
 
     assert exc_info.value.status_code == 403
