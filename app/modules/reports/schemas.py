@@ -31,6 +31,19 @@ class ModelCostEntry(DashboardModel):
     percentage: float = 0.0
 
 
+class DailySpeedRow(DashboardModel):
+    date: str
+    median_ttft_ms: float
+    median_tps: float
+    median_queue_ms: float
+
+
+class ReportSpeedResponse(DashboardModel):
+    available: bool
+    max_days: int
+    daily: list[DailySpeedRow] = Field(default_factory=list)
+
+
 class AccountCostEntry(DashboardModel):
     account_id: str | None
     alias: str | None = None

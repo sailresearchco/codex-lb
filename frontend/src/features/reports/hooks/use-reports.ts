@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { grantedScope, useAuthStore } from "@/features/auth/hooks/use-auth";
-import { getReports, getReportsOptions, getThreadIdentity } from "../api";
+import { getReports, getReportsOptions, getReportSpeeds, getThreadIdentity } from "../api";
 import { isReportDateRangeValid } from "../date";
 
 type ReportsFilterState = {
@@ -61,6 +61,27 @@ export function useReportsOptions(filters: ReportsFilterState, timeZone: string 
   });
 }
 
+export function useReportSpeeds(filters: ReportsFilterState, timeZone: string | undefined, enabled: boolean) {
+  return useQuery({
+    enabled: enabled && isReportDateRangeValid(filters.startDate, filters.endDate),
+    // Detach hidden observers so the last visible observer owns cancellation.
+    queryKey: ["reports-speed", enabled ? filters : null, enabled ? timeZone : null],
+    queryFn: ({ signal }) => getReportSpeeds({
+      startDate: filters.startDate,
+      endDate: filters.endDate,
+      accountId: filters.accountId.length > 0 ? filters.accountId : undefined,
+      apiKeyId: filters.apiKeyId?.length ? filters.apiKeyId : undefined,
+      model: filters.model || undefined,
+      useragent: filters.useragent || undefined,
+      timezone: timeZone,
+    }, signal),
+    staleTime: 5 * 60_000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+}
+
 // Raw request-log scans, so the query only runs while the card is visible and
 // its result is held far longer than the cost report's.
 const THREAD_IDENTITY_STALE_TIME_MS = 5 * 60_000;
@@ -77,7 +98,7 @@ export function useThreadIdentity(
   };
   return useQuery({
     enabled: enabled && isReportDateRangeValid(filters.startDate, filters.endDate),
-    queryKey: ["reports-thread-identity", scope],
+    queryKey: ["reports-thread-identity", enabled ? scope : null],
     queryFn: ({ signal }) => getThreadIdentity(scope, signal),
     staleTime: THREAD_IDENTITY_STALE_TIME_MS,
     refetchInterval: false,

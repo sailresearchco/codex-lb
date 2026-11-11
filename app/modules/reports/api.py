@@ -14,7 +14,12 @@ from app.core.exceptions import DashboardBadRequestError
 from app.dependencies import ReportsContext, get_reports_caches, get_reports_context
 from app.modules.reports.cache import ReportCacheKey, ReportsCaches
 from app.modules.reports.repository import DailyReportRangeTooLargeError
-from app.modules.reports.schemas import ReportsOptionsResponse, ReportsResponse, ThreadIdentityResponse
+from app.modules.reports.schemas import (
+    ReportsOptionsResponse,
+    ReportSpeedResponse,
+    ReportsResponse,
+    ThreadIdentityResponse,
+)
 from app.modules.reports.service import InvalidReportDateRangeError, resolve_report_range
 
 router = APIRouter(
@@ -41,6 +46,38 @@ async def get_reports(
         return await caches.reports.get(
             key,
             lambda: context.service.get_reports(
+                start_date=key.start,
+                end_date=key.end,
+                report_timezone=key.timezone,
+                account_ids=list(key.accounts) or None,
+                api_key_ids=list(key.api_keys) or None,
+                model=key.model or None,
+                useragent_group=key.useragent or None,
+            ),
+        )
+    except InvalidReportDateRangeError as exc:
+        raise DashboardBadRequestError(str(exc), code="invalid_report_date_range") from exc
+    except DailyReportRangeTooLargeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/speed", response_model=ReportSpeedResponse)
+async def get_report_speeds(
+    context: ReportsContext = Depends(get_reports_context),
+    caches: ReportsCaches = Depends(get_reports_caches),
+    start_date: Annotated[date | None, Query()] = None,
+    end_date: Annotated[date | None, Query()] = None,
+    report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
+    account_id: Annotated[list[str] | None, Query()] = None,
+    api_key_id: Annotated[list[str] | None, Query()] = None,
+    model: Annotated[str | None, Query()] = None,
+    useragent_group: Annotated[str | None, Query()] = None,
+) -> ReportSpeedResponse:
+    try:
+        key = _cache_key(start_date, end_date, report_timezone, account_id, api_key_id, model, useragent_group)
+        return await caches.speeds.get(
+            key,
+            lambda: context.service.get_speeds(
                 start_date=key.start,
                 end_date=key.end,
                 report_timezone=key.timezone,

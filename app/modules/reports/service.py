@@ -13,11 +13,13 @@ from app.modules.reports.repository import (
 from app.modules.reports.schemas import (
     AccountCostEntry,
     DailyReportRow,
+    DailySpeedRow,
     ModelCostEntry,
     ReportApiKeyOption,
     ReportComparison,
     ReportComparisonPrevious,
     ReportsOptionsResponse,
+    ReportSpeedResponse,
     ReportsResponse,
     ReportSummary,
     ThreadIdentityFacet,
@@ -83,6 +85,7 @@ class ReportsService:
             model,
             useragent_group,
             api_key_ids,
+            include_speed_metrics=False,
         )
         daily = [
             DailyReportRow(
@@ -130,7 +133,7 @@ class ReportsService:
         )
 
         return ReportsResponse(
-            speed_metrics_available=window_days <= MAX_SPEED_REPORT_DAYS,
+            speed_metrics_available=False,
             speed_metrics_max_days=MAX_SPEED_REPORT_DAYS,
             summary=ReportSummary(
                 total_cost_usd=round(summary.total_cost_usd, 4),
@@ -175,6 +178,39 @@ class ReportsService:
                     percentage=round((u.cost_usd / useragent_total * 100), 1) if useragent_total > 0 else 0,
                 )
                 for u in by_useragent
+            ],
+        )
+
+    async def get_speeds(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        report_timezone: str | None = None,
+        account_ids: list[str] | None = None,
+        model: str | None = None,
+        useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
+    ) -> ReportSpeedResponse:
+        start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
+        available = (end_date - start_date).days + 1 <= MAX_SPEED_REPORT_DAYS
+        rows = (
+            await self._repository.aggregate_daily_speeds(
+                start_date, end_date, timezone_info, account_ids, model, useragent_group, api_key_ids
+            )
+            if available
+            else []
+        )
+        return ReportSpeedResponse(
+            available=available,
+            max_days=MAX_SPEED_REPORT_DAYS,
+            daily=[
+                DailySpeedRow(
+                    date=row.date,
+                    median_ttft_ms=round(row.median_ttft_ms, 2),
+                    median_tps=round(row.median_tps, 2),
+                    median_queue_ms=round(row.median_queue_ms, 2),
+                )
+                for row in rows
             ],
         )
 

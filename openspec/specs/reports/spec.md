@@ -3,6 +3,18 @@
 ## Purpose
 Operators need the Reports dashboard to be narrowable to specific API-key traffic, matching the Request Logs filter, so summary, daily trend, model and account metrics can be inspected per key. This capability covers the Reports API and dashboard filtering contract.
 ## Requirements
+### Requirement: Independent speed calculations
+
+The cost-report response SHALL load without calculating raw-request speed medians. Speed charts SHALL use an independently cached, cancellable read with the same date, timezone, account, API-key, model, and user-agent filters. A speed calculation failure SHALL leave cost and usage totals available and expose a retry action for speed metrics. Hidden speed charts SHALL NOT issue speed requests.
+
+#### Scenario: Slow speed calculation
+- **WHEN** the speed calculation exceeds its read budget
+- **THEN** the cost report SHALL remain available and the speed charts SHALL show the failure without displaying zero-valued measurements as successful results.
+
+#### Scenario: Speed charts are hidden
+- **WHEN** no speed chart is visible
+- **THEN** loading or refreshing the cost report SHALL NOT calculate speed metrics.
+
 ### Requirement: API Key Filtering
 
 The `GET /api/reports` endpoint MUST support filtering report aggregations by one or more `api_key_id` query parameters.

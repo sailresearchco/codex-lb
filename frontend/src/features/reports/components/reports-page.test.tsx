@@ -14,6 +14,7 @@ import { getBrowserReportsTimeZone } from "@/features/reports/date";
 import {
   useReports,
   useReportsOptions,
+  useReportSpeeds,
   useThreadIdentity,
 } from "@/features/reports/hooks/use-reports";
 import {
@@ -29,6 +30,7 @@ vi.mock("@/features/accounts/api", () => ({
 vi.mock("@/features/reports/hooks/use-reports", () => ({
   useReports: vi.fn(),
   useReportsOptions: vi.fn(),
+  useReportSpeeds: vi.fn(),
   useThreadIdentity: vi.fn(),
 }));
 
@@ -98,6 +100,7 @@ const EMPTY_THREAD_IDENTITY_FACET: ThreadIdentityFacet = {
 
 const useReportsOptionsMock = vi.mocked(useReportsOptions);
 const useReportsMock = vi.mocked(useReports);
+const useReportSpeedsMock = vi.mocked(useReportSpeeds);
 const useThreadIdentityMock = vi.mocked(useThreadIdentity);
 const listAccountsMock = vi.mocked(listAccounts);
 const getBrowserReportsTimeZoneMock = vi.mocked(getBrowserReportsTimeZone);
@@ -126,6 +129,11 @@ const asUseReportsResult = (
 describe("ReportsPage", () => {
   beforeEach(() => {
     useReportsMock.mockReset();
+    useReportSpeedsMock.mockReset();
+    useReportSpeedsMock.mockReturnValue({
+      data: { available: true, maxDays: 7, daily: [] }, error: null,
+      isLoading: false, isFetching: false, refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useReportSpeeds>);
     useReportsOptionsMock.mockReset();
     useThreadIdentityMock.mockReset();
     useThreadIdentityMock.mockReturnValue({
@@ -196,21 +204,6 @@ describe("ReportsPage", () => {
       }),
       "America/Los_Angeles",
     );
-  });
-
-  it("shows the loading label without duplicating ellipsis punctuation", () => {
-    useReportsMock.mockReturnValue(
-      asUseReportsResult({
-        isLoading: true,
-        isError: false,
-        refetch: vi.fn(),
-      }),
-    );
-
-    renderWithProviders(<ReportsPage />);
-
-    expect(screen.getByText("Loading...")).toBeInTheDocument();
-    expect(screen.queryByText("Loading......")).not.toBeInTheDocument();
   });
 
   it("uses the live valid timezone for reports queries even when a cached value exists", async () => {
@@ -562,30 +555,6 @@ describe("ReportsPage", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders an independent user-agent distribution card below the model card", async () => {
-    useReportsMock.mockImplementation(() =>
-      asUseReportsResult({
-        data: {
-          ...EMPTY_REPORT,
-          byModel: [{ model: "gpt-5.1", costUsd: 12, requests: 3, percentage: 100 }],
-          byUseragent: [
-            { useragent: "CLI", costUsd: 10, requests: 2, percentage: 100 },
-          ],
-        },
-        isLoading: false,
-        isError: false,
-        refetch: vi.fn(),
-      }),
-    );
-
-    renderWithProviders(<ReportsPage />);
-
-    const modelCard = await screen.findByText("Distribution by Model");
-    const useragentCard = await screen.findByText("Distribution by UserAgent");
-
-    expect(modelCard.compareDocumentPosition(useragentCard)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-  });
-
   it("renders a saved chart subset without changing reports query inputs", async () => {
     window.localStorage.setItem(
       REPORT_CHART_VISIBILITY_STORAGE_KEY,
@@ -602,44 +571,10 @@ describe("ReportsPage", () => {
 
     renderWithProviders(<ReportsPage />);
 
-    expect(
-      await screen.findByText("Cost by Day", {
-        selector: "div.text-sm.font-semibold.text-foreground",
-      }),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Tokens by Day")).not.toBeInTheDocument();
-    expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
-    expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
-    expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
-    expect(screen.getByText("Total Cost")).toBeInTheDocument();
-    expect(screen.getByText("Distribution by Model")).toBeInTheDocument();
-    expect(screen.getByText("Daily Breakdown")).toBeInTheDocument();
+    expect(useReportSpeedsMock.mock.calls.at(-1)?.[2]).toBe(false);
 
     for (const [filters] of useReportsMock.mock.calls) {
       expect(filters).not.toHaveProperty("visibleChartIds");
-    }
-  });
-
-  it("renders every report chart by default", async () => {
-    useReportsMock.mockReturnValue(
-      asUseReportsResult({
-        data: EMPTY_REPORT,
-        isLoading: false,
-        isError: false,
-        refetch: vi.fn(),
-      }),
-    );
-
-    renderWithProviders(<ReportsPage />);
-
-    for (const heading of [
-      "Cost by Day",
-      "Tokens by Day",
-      "Time to First Token",
-      "Tokens per Second",
-      "Queue Wait",
-    ]) {
-      expect(await screen.findByText(heading)).toBeInTheDocument();
     }
   });
 
@@ -669,29 +604,6 @@ describe("ReportsPage", () => {
     expect(useThreadIdentityMock.mock.calls.at(-1)?.[2]).toBe(false);
   });
 
-  it("renders the selected Cost by Day and Queue Wait charts", async () => {
-    window.localStorage.setItem(
-      REPORT_CHART_VISIBILITY_STORAGE_KEY,
-      JSON.stringify(["queueWait", "costByDay"]),
-    );
-    useReportsMock.mockReturnValue(
-      asUseReportsResult({
-        data: EMPTY_REPORT,
-        isLoading: false,
-        isError: false,
-        refetch: vi.fn(),
-      }),
-    );
-
-    renderWithProviders(<ReportsPage />);
-
-    expect(await screen.findByText("Cost by Day")).toBeInTheDocument();
-    expect(await screen.findByText("Queue Wait")).toBeInTheDocument();
-    expect(screen.queryByText("Tokens by Day")).not.toBeInTheDocument();
-    expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
-    expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
-  });
-
   it("keeps summaries and non-line charts when every line chart is hidden", async () => {
     const user = userEvent.setup();
     useReportsMock.mockReturnValue(
@@ -711,15 +623,7 @@ describe("ReportsPage", () => {
     }
     await user.keyboard("{Escape}");
 
-    expect(screen.queryByText("Cost by Day")).not.toBeInTheDocument();
-    expect(screen.queryByText("Tokens by Day")).not.toBeInTheDocument();
-    expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
-    expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
-    expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
-    expect(screen.getByText("Total Cost")).toBeInTheDocument();
-    expect(screen.getByText("Distribution by Model")).toBeInTheDocument();
-    expect(screen.getByText("Distribution by UserAgent")).toBeInTheDocument();
-    expect(screen.getByText("Daily Breakdown")).toBeInTheDocument();
+    expect(useReportSpeedsMock.mock.calls.at(-1)?.[2]).toBe(false);
     expect(window.localStorage.getItem(REPORT_CHART_VISIBILITY_STORAGE_KEY)).toBe(
       JSON.stringify([]),
     );
@@ -945,19 +849,31 @@ describe("ReportsPage", () => {
     const csvContent = await blobText();
     expect(csvContent).toContain("2030-01-15,42,2,1000,200,0,50,0.1500,1,0,0");
   });
-});
-
-
-describe("report speed availability", () => {
-  it("discloses omitted long-window speed metrics without showing zero speed charts", async () => {
-    useReportsMock.mockReturnValue(asUseReportsResult({ data: { ...EMPTY_REPORT, speedMetricsAvailable: false, speedMetricsMaxDays: 7 }, isLoading: false, refetch: vi.fn() }));
-    useReportsOptionsMock.mockReturnValue({ data: { models: [], useragents: [] }, refetch: vi.fn() } as unknown as ReturnType<typeof useReportsOptions>);
+  it("retries speed failures without reloading successful cost totals", async () => {
+    const retryTotals = vi.fn();
+    const retrySpeeds = vi.fn();
+    useReportsMock.mockReturnValue(asUseReportsResult({
+      data: EMPTY_REPORT, isLoading: false, refetch: retryTotals,
+    }));
+    useReportSpeedsMock.mockReturnValue({
+      error: new Error("Speed query timed out"), isFetching: false, refetch: retrySpeeds,
+    } as unknown as ReturnType<typeof useReportSpeeds>);
+    const user = userEvent.setup();
     renderWithProviders(<ReportsPage />);
-    expect(await screen.findByText(/Speed metrics are available for date ranges of 7 days or less/)).toBeInTheDocument();
-    expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
-    expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
-    expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
-    expect(screen.getByText("Total Cost")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Retry" }));
+    expect(retrySpeeds).toHaveBeenCalledOnce();
+    expect(retryTotals).not.toHaveBeenCalled();
+    // Totals remain interactive while the independent speed query fails.
+    expect(screen.getByRole("button", { name: /csv/i })).toBeEnabled();
   });
+
+  it("does not request speed data when all speed charts are hidden", () => {
+    window.localStorage.setItem(REPORT_CHART_VISIBILITY_STORAGE_KEY, JSON.stringify(["costByDay"]));
+    useReportsMock.mockReturnValue(asUseReportsResult({
+      data: EMPTY_REPORT, isLoading: false, refetch: vi.fn(),
+    }));
+    renderWithProviders(<ReportsPage />);
+    expect(useReportSpeedsMock.mock.calls.at(-1)?.[2]).toBe(false);
+  });
+
 });

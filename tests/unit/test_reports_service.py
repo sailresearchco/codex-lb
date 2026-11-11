@@ -223,6 +223,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         "opencode",
         None,
+        include_speed_metrics=False,
     )
     repo.aggregate_by_model.assert_awaited_once_with(
         datetime(2026, 6, 1, 0, 0, 0),

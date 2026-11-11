@@ -29,6 +29,14 @@ class DailyReportRangeTooLargeError(ValueError):
 
 
 @dataclass(frozen=True)
+class DailySpeedAggregateRow:
+    date: str
+    median_ttft_ms: float
+    median_tps: float
+    median_queue_ms: float
+
+
+@dataclass(frozen=True)
 class DailyReportAggregateRow:
     date: str
     requests: int
@@ -96,6 +104,8 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        *,
+        include_speed_metrics: bool = True,
     ) -> list[DailyReportAggregateRow]:
         window_days = (end_date - start_date).days + 1
         if window_days > MAX_DAILY_REPORT_DAYS:
@@ -104,7 +114,7 @@ class ReportsRepository:
         for batch in batched(_daily_bucket_ranges(start_date, end_date, timezone_info), _SQLITE_COMPOUND_SELECT_LIMIT):
             windows = list(batch)
             speed_values: dict[str, tuple[float, float, float]] = {}
-            if window_days <= MAX_SPEED_REPORT_DAYS:
+            if include_speed_metrics and window_days <= MAX_SPEED_REPORT_DAYS:
                 speeds = await self._session.execute(
                     _daily_speed_medians_stmt(windows, account_ids, model, useragent_group, api_key_ids)
                 )
@@ -143,6 +153,37 @@ class ReportsRepository:
                     )
                 )
         return rows
+
+    async def aggregate_daily_speeds(
+        self,
+        start_date: date,
+        end_date: date,
+        timezone_info: ZoneInfo | timezone,
+        account_ids: list[str] | None = None,
+        model: str | None = None,
+        useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
+    ) -> list[DailySpeedAggregateRow]:
+        if (end_date - start_date).days + 1 > MAX_SPEED_REPORT_DAYS:
+            raise DailyReportRangeTooLargeError(f"speed report date range must be {MAX_SPEED_REPORT_DAYS} days or less")
+        rows = await self._session.execute(
+            _daily_speed_medians_stmt(
+                list(_daily_bucket_ranges(start_date, end_date, timezone_info)),
+                account_ids,
+                model,
+                useragent_group,
+                api_key_ids,
+            )
+        )
+        return [
+            DailySpeedAggregateRow(
+                date=row.report_date,
+                median_ttft_ms=float(row.median_ttft_ms or 0),
+                median_tps=float(row.median_tps or 0),
+                median_queue_ms=float(row.median_queue_ms or 0),
+            )
+            for row in rows
+        ]
 
     async def aggregate_summary(
         self,
