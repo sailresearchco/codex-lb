@@ -54,6 +54,7 @@ from app.modules.request_logs.conversation_summary import (
 )
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 from app.modules.usage.plan_downgrade_observations import discard_plan_downgrade_observations
+from app.modules.usage.read_coverage import MAX_RAW_TAIL, require_bounded_account_history
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 _SETTINGS_ROW_ID = 1
@@ -258,6 +259,7 @@ class AccountsRepository:
                 return dict(cached)
         rollup_repo = AccountUsageRollupRepository(self._session)
         folded, watermark = await rollup_repo.read_state(account_ids)
+        await require_bounded_account_history(self._session, watermark, utcnow() - MAX_RAW_TAIL)
 
         merged: dict[str, list[float]] = {
             account_id: [
@@ -269,7 +271,11 @@ class AccountsRepository:
             ]
             for account_id, sums in folded.items()
         }
-        tail_stmt = deduped_usage_aggregate_stmt(account_ids=account_ids, after_exclusive=watermark)
+        # Filter the small per-account aggregate, not the raw SQL input: a
+        # single-account predicate makes SQLite prefer a full-history account
+        # index over the countable time index. Coverage bounds this global tail.
+        selected_accounts = set(account_ids) if account_ids else None
+        tail_stmt = deduped_usage_aggregate_stmt(after_exclusive=watermark)
         result = await self._session.execute(tail_stmt)
         for (
             account_id,
@@ -279,7 +285,7 @@ class AccountsRepository:
             cached_input_tokens,
             total_cost_usd,
         ) in result.all():
-            if not account_id:
+            if not account_id or (selected_accounts is not None and account_id not in selected_accounts):
                 continue
             totals = merged.setdefault(account_id, [0, 0, 0, 0, 0.0])
             totals[0] += int(request_count or 0)

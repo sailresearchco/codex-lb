@@ -8,8 +8,10 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import BigInteger, ColumnElement, and_, case, cast, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountUsageRollupState, ApiKey, RequestLog, RequestReportHourlyRollup
 from app.modules.accounts.usage_time_rollup import epoch_seconds, to_dimension
+from app.modules.accounts.usage_time_rollup_read import ceil_to_grid, floor_to_grid
 from app.modules.reports.filters import (
     MISSING_USERAGENT_GROUP,
     _normal_traffic_clause,
@@ -20,6 +22,7 @@ from app.modules.reports.rollup_read import report_source
 from app.modules.reports.speed_histogram_read import SpeedHistogramResult, read_speed_histograms
 from app.modules.reports.thread_identity import ThreadIdentityFacetRow
 from app.modules.reports.thread_rollup_read import aggregate_cached_thread_identity
+from app.modules.usage.read_coverage import MAX_RAW_TAIL, require_bounded_raw_history
 
 _SQLITE_COMPOUND_SELECT_LIMIT = 500
 MAX_DAILY_REPORT_DAYS = 730
@@ -88,6 +91,21 @@ class UserAgentAggregateRow:
 class ReportsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def require_history_coverage(self, windows: list[tuple[datetime, datetime]]) -> None:
+        watermark = await self._session.scalar(
+            select(AccountUsageRollupState.reports_folded_through).where(AccountUsageRollupState.id == 1)
+        )
+        watermark = watermark or datetime(1970, 1, 1)
+        now = utcnow()
+        excess_ranges: list[tuple[datetime | None, datetime]] = []
+        for start, end in windows:
+            # Match report_source's unfolded tail. Leading partial UTC hours
+            # are always shorter than the allowance and remain exact raw reads.
+            high = min(watermark, floor_to_grid(end, 3600))
+            tail_start = start if high <= ceil_to_grid(start, 3600) else high
+            excess_ranges.append((tail_start, min(end, now) - MAX_RAW_TAIL))
+        await require_bounded_raw_history(self._session, excess_ranges, code="report_history_building")
 
     async def aggregate_daily_rows(
         self,
@@ -307,8 +325,11 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        *,
+        until_inclusive: datetime | None = None,
     ) -> datetime | None:
-        start, end = datetime(1970, 1, 1), datetime(9998, 1, 1)
+        start = datetime(1970, 1, 1)
+        end = until_inclusive + timedelta(microseconds=1) if until_inclusive is not None else datetime(9998, 1, 1)
         watermark = func.coalesce(
             select(AccountUsageRollupState.reports_folded_through)
             .where(AccountUsageRollupState.id == 1)
@@ -323,9 +344,11 @@ class ReportsRepository:
         r = RequestReportHourlyRollup
         conditions = [
             r.bucket_epoch >= epoch_seconds(start),
-            r.bucket_epoch < epoch_seconds(end),
+            r.bucket_epoch < epoch_seconds(ceil_to_grid(end, 3600)),
             r.bucket_epoch < watermark_epoch,
         ]
+        if until_inclusive is not None:
+            conditions.append(r.first_requested_at <= until_inclusive)
         if account_ids:
             conditions.append(r.account_id.in_([to_dimension(value) for value in account_ids]))
         if api_key_ids:
@@ -358,6 +381,7 @@ class ReportsRepository:
         return (await self._session.execute(select(func.min(source.c.first_requested_at)))).scalar_one_or_none()
 
     async def list_api_key_options(self, start_at: datetime, end_at: datetime) -> list[tuple[str, str, str | None]]:
+        await self.require_history_coverage([(start_at, end_at)])
         history = report_source(self._session, [("keys", start_at, end_at)], catalog=True)
         keys = (
             select(ApiKey.id.label("api_key_id"))
@@ -379,6 +403,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         api_key_ids: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
+        await self.require_history_coverage([(start_at, end_at)])
         source = report_source(
             self._session, [("options", start_at, end_at)], account_ids, api_key_ids=api_key_ids, catalog=True
         )

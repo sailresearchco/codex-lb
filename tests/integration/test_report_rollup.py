@@ -56,9 +56,16 @@ async def _fold(target: datetime) -> None:
             pass
 
 
+class _RawOracleReportsRepository(ReportsRepository):
+    async def require_history_coverage(self, windows: list[tuple[datetime, datetime]]) -> None:
+        # Deliberately compare this small unfurled fixture with its rollups.
+        # Public coverage/error/work behavior has separate route regressions.
+        pass
+
+
 async def _snapshot(tz: str = "UTC", **filters):
     async with SessionLocal() as session:
-        service = ReportsService(ReportsRepository(session))
+        service = ReportsService(_RawOracleReportsRepository(session))
         report = await service.get_reports(date(2026, 3, 1), date(2026, 3, 21), tz, **filters)
         options = await service.get_options(
             date(2026, 3, 1), date(2026, 3, 21), tz, filters.get("account_ids"), filters.get("api_key_ids")

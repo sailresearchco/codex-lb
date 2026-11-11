@@ -63,6 +63,7 @@ async def test_get_reports_averages_use_inclusive_local_calendar_days(
         active_accounts=1,
     )
     repo = SimpleNamespace(
+        require_history_coverage=AsyncMock(),
         aggregate_summary=AsyncMock(side_effect=[summary, summary]),
         aggregate_daily_rows=AsyncMock(return_value=[]),
         aggregate_by_model=AsyncMock(return_value=[]),
@@ -87,6 +88,7 @@ async def test_get_reports_rejects_oversized_range_after_applying_default_end_da
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = SimpleNamespace(
+        require_history_coverage=AsyncMock(),
         aggregate_summary=AsyncMock(),
         aggregate_daily_rows=AsyncMock(),
         aggregate_by_model=AsyncMock(),
@@ -112,6 +114,7 @@ async def test_get_reports_rejects_inverted_defaulted_range_before_repository_wo
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = SimpleNamespace(
+        require_history_coverage=AsyncMock(),
         aggregate_summary=AsyncMock(),
         aggregate_daily_rows=AsyncMock(),
         aggregate_by_model=AsyncMock(),
@@ -140,6 +143,7 @@ async def test_get_reports_rejects_inverted_defaulted_range_before_repository_wo
 @pytest.mark.asyncio
 async def test_get_reports_serializes_conversation_and_breakdown_request_counts() -> None:
     repo = SimpleNamespace(
+        require_history_coverage=AsyncMock(),
         aggregate_summary=AsyncMock(
             side_effect=[
                 SimpleNamespace(
@@ -249,7 +253,9 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         "opencode",
         None,
     )
-    repo.earliest_report_activity_at.assert_awaited_once_with(None, None, "opencode", None)
+    repo.earliest_report_activity_at.assert_awaited_once_with(
+        None, None, "opencode", None, until_inclusive=datetime(2026, 5, 31)
+    )
 
     assert result.daily[0].median_ttft_ms == 123.46
     assert result.daily[0].conversations == 1

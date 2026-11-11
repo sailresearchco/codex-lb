@@ -65,6 +65,14 @@ class ReportsService:
         previous_start_at = _local_midnight_to_utc_naive(previous_start_date, timezone_info)
         previous_end_at = _local_midnight_to_utc_naive(previous_end_date + timedelta(days=1), timezone_info)
 
+        await self._repository.require_history_coverage(
+            [
+                (start_at, end_at),
+                (previous_start_at, previous_end_at),
+                (datetime(1970, 1, 1), previous_start_at + timedelta(microseconds=1)),
+            ]
+        )
+
         summary = await self._repository.aggregate_summary(
             start_at, end_at, account_ids, model, useragent_group, api_key_ids
         )
@@ -77,7 +85,7 @@ class ReportsService:
             api_key_ids,
         )
         earliest_activity_at = await self._repository.earliest_report_activity_at(
-            account_ids, model, useragent_group, api_key_ids
+            account_ids, model, useragent_group, api_key_ids, until_inclusive=previous_start_at
         )
         daily_rows = await self._repository.aggregate_daily_rows(
             start_date,

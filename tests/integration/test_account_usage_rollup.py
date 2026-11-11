@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -64,8 +65,11 @@ async def _add_log(
 
 
 async def _summaries(account_ids: list[str] | None = None):
-    async with SessionLocal() as session:
-        return await AccountsRepository(session).list_request_usage_summary_by_account(account_ids)
+    # This suite compares the small raw oracle with folded totals. Public read
+    # coverage and its work bound are exercised in test_usage_history_coverage.
+    with patch("app.modules.accounts.repository.require_bounded_account_history", new=AsyncMock()):
+        async with SessionLocal() as session:
+            return await AccountsRepository(session).list_request_usage_summary_by_account(account_ids)
 
 
 async def _rollup_rows():
@@ -352,6 +356,10 @@ async def test_accounts_api_request_usage_unchanged_by_folding(async_client, db_
         accounts = {item["accountId"]: item for item in response.json()["accounts"]}
         return accounts["acc_api"]["requestUsage"]
 
+    building = await async_client.get("/api/accounts")
+    assert building.status_code == 503
+    assert building.json()["error"]["code"] == "usage_history_building"
+    await run_fold_pass(now=now)
     before = await _api_request_usage()
     assert before["requestCount"] == 3
     assert before["totalTokens"] == 1_000 + 300 + 20 + 200 + 2 * 50

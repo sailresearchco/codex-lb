@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountUsageRollup, AccountUsageRollupState, ApiKey, ApiKeyUsageRollup, RequestLog
+from app.db.request_log_predicates import ACCOUNT_USAGE_EXCLUDED_KINDS, countable_account_usage_clause
 from app.db.session import get_background_session, sqlite_writer_section
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ FOLD_SLICE = timedelta(days=7)
 
 _STATE_ROW_ID = 1
 _EPOCH = datetime(1970, 1, 1)
-_EXCLUDED_REQUEST_KINDS = ("warmup", "limit_warmup")
+_EXCLUDED_REQUEST_KINDS = ACCOUNT_USAGE_EXCLUDED_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +66,6 @@ class UsageRollupSums:
 
 def deduped_usage_aggregate_stmt(
     *,
-    account_ids: list[str] | None = None,
     after_exclusive: datetime | None = None,
     until_inclusive: datetime | None = None,
 ) -> Select[tuple[str | None, int, int | None, int, int | None, float | None]]:
@@ -78,12 +78,8 @@ def deduped_usage_aggregate_stmt(
     """
     output_tokens_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
     conditions: list = [
-        RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
-        RequestLog.deleted_at.is_(None),
-        RequestLog.account_id.is_not(None),
+        countable_account_usage_clause(RequestLog.__table__),
     ]
-    if account_ids:
-        conditions.append(RequestLog.account_id.in_(account_ids))
     if after_exclusive is not None:
         conditions.append(RequestLog.requested_at > after_exclusive)
     if until_inclusive is not None:
@@ -388,9 +384,7 @@ async def _fold_next_slice(session: AsyncSession, target: datetime) -> tuple[_Fo
         account_earliest = (
             await session.execute(
                 select(func.min(RequestLog.requested_at)).where(
-                    RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
-                    RequestLog.deleted_at.is_(None),
-                    RequestLog.account_id.is_not(None),
+                    countable_account_usage_clause(RequestLog.__table__),
                 )
             )
         ).scalar_one_or_none()
