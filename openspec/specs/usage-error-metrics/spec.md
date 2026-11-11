@@ -89,16 +89,25 @@ the migration (its entire backfill is legacy-suspect); new code's own
 bootstrap MUST write the marker as NULL, and NULL MUST only ever be written
 by new code, meaning no legacy-suspect range is outstanding.
 
-While the marker is set, the hourly fold pass MUST refold
-`[upgrade_repair_from, hourly_folded_through)` from raw request logs in
-bounded slice-sized chunks, persisting progress by advancing the marker with
-each chunk's commit and setting it to NULL only once the range is covered —
-a crash resumes instead of restarting, and a pass-bounded incomplete repair
-continues on later passes. With the marker NULL, the first fold pass of each
+When starting a repair, the hourly fold pass MUST persist the current hourly
+watermark as `upgrade_repair_through` before recomputing rollups. It MUST
+refold `[upgrade_repair_from, upgrade_repair_through)` from raw request logs
+in transactions covering at most one whole UTC hour, persisting progress by
+advancing the start marker with each chunk's commit and clearing both markers
+only once that fixed range and any subsequent legacy-suspect range are covered.
+A crash resumes instead of restarting;
+an incomplete repair continues on later passes even if normal folding advances
+the hourly watermark. If the watermark advanced, the repair MUST capture a
+follow-up range from the completed target to the current watermark only at the
+completed range boundary, retaining the per-pass transaction limit. It MUST NOT
+extend the target of an unfinished range. The one-hour limit bounds the historical interval, not
+the number of requests or execution time within a dense hour.
+With the start marker NULL, the first fold pass of each
 new-code process MUST still refold the trailing repair window below the
 watermark (a span that comfortably exceeds any rolling-upgrade duration) as
 defense against a legacy replica regaining fold leadership after the marker
-was cleared.
+was cleared. This path MUST also persist its initial start and fixed end before
+recomputation, so interruption of its first hour cannot restart a moving window.
 
 Both paths MUST be idempotent (converging DELETE-then-INSERT recomputation),
 MUST run under the existing fold leader gate and fold-state row lock, MUST
@@ -126,6 +135,24 @@ historical backfill.
 - **WHEN** the new code runs its hourly fold passes
 - **THEN** every bucket in `[upgrade_repair_from, watermark)` with surviving
   raw rows is recomputed and the marker ends NULL
+
+#### Scenario: An interrupted startup repair resumes its fixed range
+
+- **GIVEN** a startup repair initialized from a NULL marker and committed one
+  hour, and normal folding subsequently advanced the hourly watermark
+- **WHEN** a later hour is cancelled after deleting rollup rows and the process restarts
+- **THEN** all three rollup tables and repair progress for that hour remain unchanged
+- **AND** the next pass resumes at the first uncommitted hour toward the original
+  persisted end, retaining every request in a dense hour without partial publication
+- **AND** completion clears both markers and yields the same aggregates as an
+  uninterrupted recomputation of that fixed range
+
+#### Scenario: A legacy leader advances during a repair
+
+- **GIVEN** another leader advances the hourly watermark during an incomplete repair
+- **WHEN** that repair reaches its persisted end
+- **THEN** the repair captures a separate fixed follow-up range ending at the new watermark
+- **AND** the follow-up finishes on later bounded passes and clears both markers once covered
 
 #### Scenario: Buckets below the surviving-raw clamp are preserved
 

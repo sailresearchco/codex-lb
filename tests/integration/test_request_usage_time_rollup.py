@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 
 import app.modules.accounts.usage_time_rollup as time_rollup_module
 from app.core.crypto import TokenEncryptor
@@ -14,7 +14,9 @@ from app.db.models import (
     AccountStatus,
     AccountUsageRollupState,
     RequestConversationHourlyRollup,
+    RequestDemandQuarterRollup,
     RequestLog,
+    RequestUsageHourlyErrorRollup,
     RequestUsageHourlyRollup,
 )
 from app.db.session import SessionLocal
@@ -912,7 +914,11 @@ async def test_first_fold_pass_repairs_legacy_folded_rollout_window(db_setup):
     # New code's first pass (one-shot flag re-armed) repairs the window even
     # though the watermark is already at target (no forward slice to fold).
     time_rollup_module._upgrade_repair_done = False
-    await run_hourly_fold_pass(now=now)
+    for _ in range(4):
+        await run_hourly_fold_pass(now=now)
+        if time_rollup_module._upgrade_repair_done:
+            break
+    assert time_rollup_module._upgrade_repair_done
     time_rollup_module._upgrade_repair_done = True
 
     hourly, errors, _demand, _watermark = await _dump_all_rollups()
@@ -993,7 +999,11 @@ async def test_upgrade_repair_marker_covers_multi_slice_legacy_advance(db_setup)
         await session.commit()
 
     time_rollup_module._upgrade_repair_done = False
-    await run_hourly_fold_pass(now=now)
+    for _ in range(4):
+        await run_hourly_fold_pass(now=now)
+        if time_rollup_module._upgrade_repair_done:
+            break
+    assert time_rollup_module._upgrade_repair_done
     time_rollup_module._upgrade_repair_done = True
 
     hourly, errors, _demand, _watermark = await _dump_all_rollups()
@@ -1012,6 +1022,105 @@ async def test_upgrade_repair_marker_covers_multi_slice_legacy_advance(db_setup)
             await session.execute(select(AccountUsageRollupState).where(AccountUsageRollupState.id == 1))
         ).scalar_one()
         assert state.upgrade_repair_from is None
+        assert state.upgrade_repair_through is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_upgrade_repair_resumes_fixed_range_and_rolls_back_whole_dense_hour(db_setup, monkeypatch, failure):
+    now = datetime(2026, 11, 9, 12)
+    start = now - timedelta(hours=5)
+    target = now - FOLD_LAG
+    rows = []
+    for hour, count in enumerate((4000, 6, 6, 6)):
+        for index in range(count):
+            status = ("success", "error", "cancelled")[index % 3]
+            rows.append(
+                {
+                    "request_id": f"repair-{hour}-{index}",
+                    "requested_at": start + timedelta(hours=hour, seconds=index % 3600),
+                    "model": f"model-{index % 4}",
+                    "status": status,
+                    "error_code": "upstream_500" if status == "error" else "client_disconnected",
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "deleted_at": start if index % 5 == 0 else None,
+                }
+            )
+    async with SessionLocal() as session:
+        await session.execute(insert(RequestLog), rows)
+        await session.commit()
+    monkeypatch.setattr(time_rollup_module, "_upgrade_repair_done", True)
+    await run_hourly_fold_pass(now=now + timedelta(hours=1))
+    async with SessionLocal() as session:
+        await session.execute(update(AccountUsageRollupState).values(hourly_folded_through=target))
+        await session.commit()
+    expected = await _dump_all_rollups()
+    async with SessionLocal() as session:
+        await session.execute(update(RequestUsageHourlyRollup).values(request_count=99999, cancelled_count=0))
+        await session.execute(update(RequestUsageHourlyErrorRollup).values(error_count=99999))
+        await session.execute(update(RequestDemandQuarterRollup).values(request_count=99999))
+        await session.commit()
+    corrupted = await _dump_all_rollups()
+
+    async def repair_state():
+        async with SessionLocal() as session:
+            state = (await session.execute(select(AccountUsageRollupState))).scalar_one()
+            return state.upgrade_repair_from, state.upgrade_repair_through, state.hourly_folded_through
+
+    # Even the NULL-marker startup path commits its fixed range before any
+    # expensive recomputation, and a pass never performs more than its budget.
+    monkeypatch.setattr(time_rollup_module, "TS_MAX_SLICES_PER_PASS", 1)
+    monkeypatch.setattr(time_rollup_module, "_upgrade_repair_done", False)
+    await run_hourly_fold_pass(now=now)
+    assert await repair_state() == (start, target, target)
+    assert await _dump_all_rollups() == corrupted
+
+    # Re-enter through the public scheduler entry point as a new process
+    # would. All 4,000 rows in the first hour are repaired atomically; later
+    # hours remain untouched until their own transactions.
+    monkeypatch.setattr(time_rollup_module, "_upgrade_repair_done", False)
+    await run_hourly_fold_pass(now=now)
+    assert await repair_state() == (start + timedelta(hours=1), target, target)
+    partial = await _dump_all_rollups()
+    assert [row for row in partial[0] if row.bucket_epoch == epoch_seconds(start)] == [
+        row for row in expected[0] if row.bucket_epoch == epoch_seconds(start)
+    ]
+    assert [row for row in partial[0] if row.bucket_epoch > epoch_seconds(start)] == [
+        row for row in corrupted[0] if row.bucket_epoch > epoch_seconds(start)
+    ]
+
+    # A different fold can advance the live watermark between repair
+    # transactions; it must not move this repair's persisted target.
+    advanced = target + timedelta(hours=1)
+    async with SessionLocal() as session:
+        await session.execute(update(AccountUsageRollupState).values(hourly_folded_through=advanced))
+        await session.commit()
+    before_failure = await _dump_all_rollups()
+    original = time_rollup_module._hourly_fold_insert
+
+    def fail_after_deletes(*args):
+        raise failure("interrupted repair")
+
+    monkeypatch.setattr(time_rollup_module, "_hourly_fold_insert", fail_after_deletes)
+    with pytest.raises(failure):
+        await run_hourly_fold_pass(now=now)
+    assert await _dump_all_rollups() == before_failure
+    assert await repair_state() == (start + timedelta(hours=1), target, advanced)
+
+    monkeypatch.setattr(time_rollup_module, "_hourly_fold_insert", original)
+    monkeypatch.setattr(time_rollup_module, "_upgrade_repair_done", False)
+    await run_hourly_fold_pass(now=now)
+    assert await repair_state() == (start + timedelta(hours=2), target, advanced)
+    await run_hourly_fold_pass(now=now)
+    assert await repair_state() == (target, advanced, advanced)
+    assert not time_rollup_module._upgrade_repair_done
+    # Any advancement by a legacy leader is covered by a separate fixed
+    # follow-up range, captured only after the original range completes.
+    await run_hourly_fold_pass(now=now)
+    assert await repair_state() == (None, None, advanced)
+    assert time_rollup_module._upgrade_repair_done
+    assert (await _dump_all_rollups())[:3] == expected[:3]
 
 
 @pytest.mark.asyncio
