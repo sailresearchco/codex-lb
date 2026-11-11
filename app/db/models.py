@@ -281,6 +281,7 @@ class AccountUsageRollupState(Base):
     # Fixed end of an in-progress repair. Normal folding may advance its
     # watermark between repair passes; a restart must resume the same range.
     upgrade_repair_through: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    conversation_reset_after_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     reports_folded_through: Mapped[datetime] = mapped_column(
         DateTime,
@@ -431,6 +432,48 @@ class RequestDemandQuarterRollup(Base):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
 
 
+class RequestConversationSummary(Base):
+    """Exact projection of included, retained, live conversation requests."""
+
+    __tablename__ = "request_conversation_summaries"
+
+    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    first_requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    request_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cached_known_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    __table_args__ = (Index("idx_conversation_summary_latest", last_requested_at.desc(), conversation_id),)
+
+
+class RequestConversationFacet(Base):
+    __tablename__ = "request_conversation_facets"
+
+    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String, primary_key=True)
+    request_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class RequestConversationModelSummary(Base):
+    __tablename__ = "request_conversation_model_summaries"
+
+    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    reasoning_effort: Mapped[str] = mapped_column(String, primary_key=True)
+    request_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    total_elapsed_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cached_known_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    last_requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class RequestConversationHourlyRollup(Base):
     """Hour-bucketed conversation presence (distinct-conversation satellite).
 
@@ -480,6 +523,27 @@ class RequestLog(Base):
         Index("idx_logs_useragent_group", "useragent_group"),
         Index("idx_logs_conversation_deleted", "conversation_id", "deleted_at"),
         Index("idx_logs_client_ip", "client_ip"),
+        Index(
+            "idx_logs_conversation_summary_pending",
+            "id",
+            sqlite_where=text("conversation_summary_included IS 0"),
+            postgresql_where=text("conversation_summary_included IS FALSE"),
+        ),
+        Index(
+            "idx_logs_conversation_summary_time",
+            "conversation_id",
+            "requested_at",
+            sqlite_where=text(
+                "conversation_summary_included IS 1 AND deleted_at IS NULL "
+                "AND request_kind NOT IN ('warmup', 'limit_warmup') "
+                "AND conversation_id IS NOT NULL AND conversation_id != ''"
+            ),
+            postgresql_where=text(
+                "conversation_summary_included IS TRUE AND deleted_at IS NULL "
+                "AND request_kind NOT IN ('warmup', 'limit_warmup') "
+                "AND conversation_id IS NOT NULL AND conversation_id != ''"
+            ),
+        ),
     )
 
     sticky_key_source: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -487,6 +551,7 @@ class RequestLog(Base):
     sticky_key_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_summary_included: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     account_id: Mapped[str | None] = mapped_column(
         String,
         ForeignKey("accounts.id", ondelete="SET NULL"),

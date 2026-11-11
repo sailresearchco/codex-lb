@@ -413,6 +413,8 @@ async def test_local_identity_writers_lock_old_and_incoming_membership(monkeypat
     monkeypatch.setattr(repo, "_apply_account_replacement", AsyncMock())
     monkeypatch.setattr(repository_module, "lock_fold_state", AsyncMock())
     monkeypatch.setattr(repository_module, "mirror_account_soft_delete_into_time_rollups", AsyncMock())
+    remove_history = AsyncMock()
+    monkeypatch.setattr(repository_module, "remove_account_history", remove_history)
 
     await repo.replace_reauthorized(
         existing.id,
@@ -429,6 +431,7 @@ async def test_local_identity_writers_lock_old_and_incoming_membership(monkeypat
     )
     assert await repo.update_account_metadata(existing.id, chatgpt_account_id="chatgpt_new")
     assert await repo.delete(existing.id)
+    remove_history.assert_awaited_once_with(repo.session, existing.id, delete_history=False)
 
     assert membership_locks == [
         (existing.id, "chatgpt_new"),

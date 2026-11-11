@@ -13,6 +13,7 @@ from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import AccountSummary
 from app.modules.dashboard.weekly_pace import _weekly_timing
+from app.modules.request_logs.conversation_summary import backfill_conversation_summaries
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -415,6 +416,8 @@ async def test_conversation_list_agrees_with_dashboard_activity_window(
         )
         await session.commit()
 
+    while await backfill_conversation_summaries():
+        pass
     conversations_response = await async_client.get("/api/conversations", params={"since": since.isoformat()})
     dashboard_response = await async_client.get("/api/dashboard/overview?timeframe=1d")
 

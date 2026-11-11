@@ -11,6 +11,7 @@ from app.core.utils.time import utcnow
 from app.db.models import AccountUsageRollupState, AdditionalUsageHistory, RequestLog, UsageHistory
 from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.usage_rollup import FOLD_LAG
+from app.modules.request_logs.conversation_summary import capture_contributions, subtract_contributions
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 logger = logging.getLogger(__name__)
@@ -142,12 +143,15 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                     .where(RequestLog.requested_at < effective_cutoff)
                     .order_by(RequestLog.requested_at.asc(), RequestLog.id.asc())
                     .limit(BATCH_SIZE)
-                ).scalar_subquery()
-                result = await session.execute(
-                    delete(RequestLog).where(RequestLog.id.in_(batch_ids)).returning(RequestLog.id)
                 )
+                ids = list((await session.scalars(batch_ids)).all())
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start : start + 500]
+                    before = await capture_contributions(session, RequestLog.id.in_(chunk))
+                    await session.execute(delete(RequestLog).where(RequestLog.id.in_(chunk)))
+                    await subtract_contributions(session, before)
                 await session.commit()
-        deleted = len(result.scalars().all())
+        deleted = len(ids)
         total += deleted
         if deleted < BATCH_SIZE:
             return total

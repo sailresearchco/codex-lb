@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Normative contract for the `/api/conversations` listing and `/api/conversations/{id}` detail endpoints. Conversations are a **derived view** over `request_logs` grouped by `conversation_id` — there is no stored conversation entity. This capability pins the membership, windowing, and timestamp semantics for that derived view.
+Normative contract for the `/api/conversations` listing and `/api/conversations/{id}` detail endpoints. Conversations are a **derived view** over retained `request_logs` grouped by `conversation_id`. Stored summary projections accelerate this view; they do not introduce an independently editable conversation entity. This capability pins the membership, windowing, and timestamp semantics for that derived view.
 ## Requirements
 ### Requirement: Conversations qualify by any in-window request
 
@@ -90,32 +90,100 @@ The membership rule used by `/api/conversations` (any in-window request qualifie
 - **AND** the operator requests `GET /api/conversations?timeframe=7d` against the same fixed server clock
 - **THEN** the conversations list includes `conv-a` and excludes `conv-b`, agreeing with the dashboard aggregation row-for-row
 
-### Requirement: Conversation membership candidate discovery is bounded
+### Requirement: Conversation list and detail reads use exact maintained summaries
 
-When the conversations list has an effective `since` value, the repository MUST discover qualifying conversation IDs from eligible rows with
-`requested_at >= since` before aggregating the list page. The candidate query
-MUST select distinct IDs and MUST include the active search predicate when a
-search term is supplied. The summary and facet aggregates MUST constrain their
-full-history eligible-row scans to those candidate IDs; they MUST NOT use an
-unbounded grouped summary with a `HAVING` activity filter as the membership
-gate.
+The list MUST discover activity membership, count, ordering, and pagination from
+conversation summaries indexed by latest activity and conversation ID. It MUST
+NOT aggregate raw request history on a request path. List totals and facets and
+detail model/reasoning statistics MUST include all retained eligible history,
+including rows older than `since`. The detail route MUST use the same summaries,
+with separate groups for NULL and empty reasoning efforts and unknown cached
+usage remaining NULL. Ties MUST retain the existing count, latest timestamp,
+and lexical ordering rules.
 
-The full-history aggregate semantics remain unchanged for each selected ID:
-`firstRequest`, request counts, token totals, costs, and facets MUST include
-all eligible rows for that conversation, including rows older than `since`.
+Search MUST match a conversation ID or a user-agent value present in an eligible
+row at or after `since`. A user-agent match only in older history MUST NOT qualify
+the conversation. LIKE wildcard characters in the search string remain literal.
 
-#### Scenario: Inactive history is pruned before summary aggregation
-- **GIVEN** `conv-a` has eligible rows before and after `since`
-- **AND** `conv-b` has eligible rows only before `since`
-- **WHEN** the operator requests the conversation list for that `since`
-- **THEN** candidate discovery includes `conv-a` and excludes `conv-b` before the grouped summary
-- **AND** `conv-a`'s summary still includes its pre-window rows
+#### Scenario: Dense long-running conversation has bounded read work
 
-#### Scenario: Search candidate discovery uses the activity window
-- **GIVEN** an eligible active conversation has a matching search value on a row at or after `since`
-- **WHEN** the operator searches the conversation list for that value
-- **THEN** the distinct search candidate query is constrained by `requested_at >= since`
-- **AND** the returned conversation's aggregate still includes all of its eligible history
+- **GIVEN** one conversation has many thousands of retained requests and recent activity
+- **WHEN** the operator lists, searches, paginates deeply, or opens its details
+- **THEN** the response preserves its full retained-history totals and true earliest timestamp
+- **AND** database read work depends on summary and facet rows, not its raw request count
+
+### Requirement: Summary maintenance is transactional and resumable
+
+Each raw request row MUST record whether its contribution is included. New writes
+MUST insert the row and its summary contribution in the same transaction. Historical
+backfill MUST process at most 500 rows per transaction by default, atomically
+updating summaries and inclusion markers; no transaction may publish partial
+projection state. Reusing a deleted raw row ID MUST NOT cause a skipped or duplicate
+contribution. A failed or cancelled transaction MUST roll back both projection
+changes and inclusion flags.
+
+Model/cost corrections, account merge, soft deletion, hard deletion, and retention
+MUST update these retained-history summaries in the raw mutation's transaction.
+Retention MUST subtract pruned rows, unlike permanent usage rollups. Surviving
+boundary timestamps MUST be exact, including when multiple requests share a
+timestamp. Account deletion and merge maintenance MUST process bounded batches
+without materializing an account's whole raw history in application memory.
+PostgreSQL nonappend mutations MUST preserve the fold-state-then-conversation-lock
+order; normal appends MUST NOT wait on the global fold-state lock.
+
+All request-log mutation writers MUST be upgraded before completed summaries are
+served. Older inserts default to not included and are detected by the reader;
+older updates to already included rows cannot maintain the new projection.
+
+After any return to older mutation writers, operators MUST stop ALL request-log
+writers and run `python -m app.modules.request_logs.conversation_summary_reset`
+with the application's database configuration before restarting upgraded writers.
+Writers MUST remain stopped until the command succeeds. The command MUST preserve
+raw history, reset inclusion flags in keyset pages of at most 500 rows, and persist
+each page's cursor atomically. An interrupted command MUST resume from that cursor.
+Only after all raw pages are reset may it atomically clear all three conversation
+projection tables and the reset cursor. While a reset cursor exists, list and
+detail routes MUST return `conversation_summaries_building` and background summary
+backfill MUST perform no work. After successful reset, normal bounded backfill
+MUST rebuild summaries before they are served. This command does not support
+concurrent writers or automatically detect older-writer updates.
+
+#### Scenario: Re-entry after older writers changed included rows
+
+- **GIVEN** completed summaries and an older writer that updated one included raw row and deleted another
+- **WHEN** all writers are stopped and the offline reset is interrupted, then resumed
+- **THEN** committed reset pages are retained, unfinished pages roll back, and reads remain unavailable during reset
+- **AND** background backfill does not consume partially reset inclusion flags
+- **AND** successful reset followed by normal backfill returns exact retained counts, tokens, costs, and model statistics without changing raw history
+
+#### Scenario: Backfill interruption resumes without double counting
+
+- **GIVEN** some historical rows are included and later rows remain unprocessed
+- **WHEN** a backfill transaction is cancelled after updating a projection
+- **THEN** its projection and inclusion changes roll back together
+- **AND** a later pass resumes from unprocessed rows and counts each exactly once
+
+#### Scenario: Retention changes a conversation's earliest retained request
+
+- **GIVEN** two requests share the earliest timestamp and a later request survives retention
+- **WHEN** retention deletes both earliest rows
+- **THEN** the list and detail start becomes the later request's timestamp
+- **AND** counts, tokens, costs, model statistics, and facets exclude the pruned rows
+
+### Requirement: Incomplete summaries return an explicit building response
+
+If any raw request row remains unprocessed, list and detail routes MUST return
+HTTP 503 with error code `conversation_summaries_building`. They MUST NOT return
+an empty or partial conversation list and MUST NOT fall back to a full-history
+raw aggregation. The existing dashboard error and Retry controls MUST expose
+this recoverable state. Background backfill MUST own and drain its task on
+shutdown and release the writer between bounded transactions.
+
+#### Scenario: An old writer appends after initial backfill
+
+- **GIVEN** completed summaries and a newly inserted row without an inclusion marker
+- **WHEN** a conversation list or detail is requested
+- **THEN** the route returns the explicit building response until that row is included
 
 ### Requirement: Conversation list and detail routes require an admin principal
 

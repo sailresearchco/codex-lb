@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
@@ -16,6 +15,12 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey, RequestKind, RequestLog
 from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.usage_rollup import lock_fold_state
+from app.modules.request_logs.conversation_summary import (
+    backfill_conversation_summaries,
+    capture_contributions,
+    subtract_contributions,
+)
 from app.modules.request_logs.repository import RequestLogsRepository
 
 pytestmark = pytest.mark.integration
@@ -26,16 +31,16 @@ def _assert_no_seeded_sensitive_values(response, values: tuple[str, ...]) -> Non
     assert all(value not in serialized for value in values)
 
 
-def _distinct_candidate_fragments(statements: list[str]) -> list[str]:
-    return [
-        match.group(0)
-        for statement in statements
-        for match in re.finditer(
-            r"SELECT DISTINCT REQUEST_LOGS\.CONVERSATION_ID.*?\)\s+AS",
-            statement.upper(),
-            flags=re.DOTALL,
-        )
-    ]
+async def _finish_summary_backfill():
+    while await backfill_conversation_summaries():
+        pass
+
+
+async def _soft_delete_seed(session, condition, deleted_at):
+    await lock_fold_state(session)
+    before = await capture_contributions(session, condition)
+    await session.execute(update(RequestLog).where(condition).values(deleted_at=deleted_at))
+    await subtract_contributions(session, before)
 
 
 def _account(account_id: str) -> Account:
@@ -84,6 +89,7 @@ async def _seed_conversations(base):
             ]
         )
         await session.commit()
+        await _finish_summary_backfill()
 
         rows = [
             # Search matches this row's UA, but the other eligible rows must
@@ -308,8 +314,9 @@ async def test_conversation_pages_order_by_latest_eligible_activity_and_keep_ful
                 conversation_id=conversation_id,
                 request_kind=request_kind,
             )
-        await session.execute(update(RequestLog).where(RequestLog.request_id == "page-deleted").values(deleted_at=base))
+        await _soft_delete_seed(session, RequestLog.request_id == "page-deleted", base)
         await session.commit()
+        await _finish_summary_backfill()
 
     pages = []
     for offset in range(4):
@@ -375,8 +382,9 @@ async def test_conversation_list_excludes_blank_warmup_limit_warmup_and_deleted(
                 request_kind=request_kind,
             )
         assert await session.scalar(select(RequestLog.conversation_id).where(RequestLog.request_id == "blank")) is None
-        await session.execute(update(RequestLog).where(RequestLog.request_id == "deleted").values(deleted_at=base))
+        await _soft_delete_seed(session, RequestLog.request_id == "deleted", base)
         await session.commit()
+        await _finish_summary_backfill()
 
     response = await async_client.get("/api/conversations")
     assert response.status_code == 200
@@ -526,6 +534,7 @@ async def test_conversation_list_api_key_representative_is_safe_and_deterministi
             ]
         )
         await session.commit()
+        await _finish_summary_backfill()
         for request_id, api_key_id in (("key-tie-a", "key-tie-a"), ("key-tie-z", "key-tie-z")):
             await logs.add_log(
                 account_id=None,
@@ -567,6 +576,7 @@ async def test_conversation_list_api_key_representative_ignores_stale_majority(a
             )
         )
         await session.commit()
+        await _finish_summary_backfill()
         for index in range(3):
             await logs.add_log(
                 account_id=None,
@@ -888,8 +898,9 @@ async def test_conversation_details_excludes_warmups_and_soft_deleted_rows(async
             requested_at=base + timedelta(minutes=2),
             conversation_id="eligible-conversation",
         )
-        await session.execute(update(RequestLog).where(RequestLog.id == deleted.id).values(deleted_at=base))
+        await _soft_delete_seed(session, RequestLog.id == deleted.id, base)
         await session.commit()
+        await _finish_summary_backfill()
 
     response = await async_client.get("/api/conversations/eligible-conversation")
 
@@ -1339,14 +1350,17 @@ async def test_conversation_search_candidates_are_bounded_to_activity_window(db_
     assert result.total == 1
     assert result.summaries[0].conversation_id == "bounded-search"
     assert result.summaries[0].request_count == 2
-    candidate_fragments = _distinct_candidate_fragments(statements)
-    assert candidate_fragments
-    assert any("REQUEST_LOGS.REQUESTED_AT >= " in fragment for fragment in candidate_fragments)
-    assert any("REQUEST_LOGS.USERAGENT_GROUP" in fragment for fragment in candidate_fragments)
+    assert any("request_conversation_summaries" in statement for statement in statements)
+    assert any("request_conversation_facets" in statement for statement in statements)
+    # The only raw read is the indexed pending-inclusion probe, never history aggregation.
+    raw_reads = [statement for statement in statements if "FROM request_logs" in statement]
+    assert len(raw_reads) == 1
+    assert "conversation_summary_included" in raw_reads[0]
+    assert "GROUP BY" not in raw_reads[0].upper()
 
 
 @pytest.mark.asyncio
-async def test_conversation_listing_total_cached_across_identical_signatures(async_client, db_setup, monkeypatch):
+async def test_conversation_listing_total_preserves_time_and_search_scopes(async_client, db_setup, monkeypatch):
     from app.modules.request_logs import repository as logs_repository_module
 
     monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
@@ -1396,7 +1410,6 @@ async def test_conversation_listing_total_cached_across_identical_signatures(asy
     t2 = second.json()["total"]
     assert t1 == 2
     assert t2 == t1
-    assert ("conversation-count", None, ("since", wide_since)) in logs_repository_module._recent_count_cache
 
     logs_repository_module._clear_recent_count_cache()
 
@@ -1404,7 +1417,6 @@ async def test_conversation_listing_total_cached_across_identical_signatures(asy
     narrow = await async_client.get(f"/api/conversations?since={narrow_since.isoformat()}")
     assert narrow.status_code == 200
     assert narrow.json()["total"] == 1
-    assert ("conversation-count", None, ("since", narrow_since)) in logs_repository_module._recent_count_cache
 
     matching_old = await async_client.get(
         "/api/conversations",
@@ -1418,8 +1430,6 @@ async def test_conversation_listing_total_cached_across_identical_signatures(asy
     assert matching_new.status_code == 200
     assert matching_old.json()["total"] == 1
     assert matching_new.json()["total"] == 1
-    assert ("conversation-count", "cache-old", ("since", wide_since)) in logs_repository_module._recent_count_cache
-    assert ("conversation-count", "cache-new", ("since", wide_since)) in logs_repository_module._recent_count_cache
 
     logs_repository_module._clear_recent_count_cache()
 
@@ -1482,6 +1492,7 @@ async def test_conversation_timeframe_uses_server_window(
             ]
         )
         await session.commit()
+        await _finish_summary_backfill()
 
     response = await async_client.get("/api/conversations", params={"timeframe": timeframe})
 
@@ -1538,6 +1549,7 @@ async def test_conversation_timeframe_matches_dashboard_activity_under_fixed_clo
             ]
         )
         await session.commit()
+        await _finish_summary_backfill()
 
     conversations_response = await async_client.get("/api/conversations", params={"timeframe": "7d"})
     dashboard_response = await async_client.get("/api/dashboard/overview", params={"timeframe": "7d"})
@@ -1601,6 +1613,7 @@ async def test_conversation_since_timezone_offset_is_normalized_to_utc(
             ]
         )
         await session.commit()
+        await _finish_summary_backfill()
 
     response = await async_client.get(
         "/api/conversations",
@@ -1641,6 +1654,7 @@ async def test_conversation_since_older_than_30_days_is_clamped(
             ]
         )
         await session.commit()
+        await _finish_summary_backfill()
 
     response = await async_client.get(
         "/api/conversations",
@@ -1696,6 +1710,7 @@ async def test_conversation_since_future_timestamp_returns_empty_result(
             )
         )
         await session.commit()
+        await _finish_summary_backfill()
 
     response = await async_client.get(
         "/api/conversations",
