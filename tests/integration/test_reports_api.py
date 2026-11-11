@@ -5,8 +5,12 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from app.core.crypto import TokenEncryptor
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
+from app.modules.accounts.usage_rollup import FOLD_LAG
+from app.modules.accounts.usage_time_rollup import floor_to_hour
+from app.modules.reports.rollup import fold_next_report_slice
 
 pytestmark = pytest.mark.integration
 
@@ -28,6 +32,15 @@ def _make_account(account_id: str, email: str) -> Account:
 
 def _naive_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=None)
+
+
+async def _get_after_report_fold(client, *args, **kwargs):
+    # These fixtures exercise report semantics with historical data. Coverage
+    # refusal/retry is tested separately against real cold public routes.
+    async with SessionLocal() as session:
+        while await fold_next_report_slice(session, floor_to_hour(utcnow() - FOLD_LAG)):
+            pass
+    return await client.get(*args, **kwargs)
 
 
 async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
@@ -62,7 +75,8 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": start_at.date().isoformat(),
@@ -185,7 +199,8 @@ async def test_reports_api_aggregates_reasoning_tokens_for_unfiltered_window(asy
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-03"},
     )
@@ -274,7 +289,8 @@ async def test_reports_api_reasoning_tokens_honor_filters_without_double_countin
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -348,7 +364,8 @@ async def test_reports_api_returns_distinct_nonblank_conversation_counts(async_c
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -369,7 +386,8 @@ async def test_reports_api_returns_distinct_nonblank_conversation_counts(async_c
 
 
 async def test_reports_api_rejects_oversized_date_ranges(async_client, db_setup):
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2024-01-01",
@@ -381,7 +399,8 @@ async def test_reports_api_rejects_oversized_date_ranges(async_client, db_setup)
 
 
 async def test_reports_api_rejects_oversized_date_ranges_with_default_end_date(async_client, db_setup):
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2020-01-01",
@@ -413,11 +432,13 @@ async def test_reports_api_rejects_inverted_range_and_preserves_valid_one_day(
         )
         await session.commit()
 
-    inverted_response = await async_client.get(
+    inverted_response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"start_date": "2026-06-07", "end_date": "2026-06-01"},
     )
-    valid_response = await async_client.get(
+    valid_response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"start_date": report_day.isoformat(), "end_date": report_day.isoformat()},
     )
@@ -441,7 +462,8 @@ async def test_reports_api_accepts_inclusive_730_day_range(async_client, db_setu
     end_date = date(2026, 1, 1)
     start_date = end_date - timedelta(days=729)
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
     )
@@ -469,7 +491,8 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": start_at.date().isoformat(),
@@ -545,7 +568,8 @@ async def test_reports_api_includes_end_date_until_next_midnight(async_client, d
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
     )
@@ -614,7 +638,8 @@ async def test_reports_api_interprets_dates_in_requested_timezone(async_client, 
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -681,7 +706,8 @@ async def test_reports_api_falls_back_to_utc_for_invalid_timezone(async_client, 
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -731,7 +757,8 @@ async def test_reports_api_falls_back_to_utc_for_malformed_timezone(async_client
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -803,7 +830,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days(async_cli
         )
         await session.commit()
 
-    response = await async_client.get("/api/reports")
+    response = await _get_after_report_fold(async_client, "/api/reports")
     assert response.status_code == 200
 
     payload = response.json()
@@ -870,7 +897,8 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"timezone": "America/Los_Angeles"},
     )
@@ -973,7 +1001,8 @@ async def test_reports_api_uses_dst_aware_boundaries_for_requested_timezone(asyn
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-03-08",
@@ -1038,7 +1067,8 @@ async def test_reports_api_returns_previous_window_comparison_for_complete_histo
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-05",
@@ -1090,7 +1120,8 @@ async def test_reports_api_suppresses_comparison_when_previous_window_is_incompl
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-05",
@@ -1142,7 +1173,8 @@ async def test_reports_api_comparison_uses_requested_timezone_boundaries(async_c
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-05",
@@ -1221,7 +1253,8 @@ async def test_reports_api_comparison_completeness_honors_active_filters(async_c
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-05",
@@ -1287,7 +1320,8 @@ async def test_reports_api_comparison_ignores_warmup_traffic_for_coverage(async_
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-05",
@@ -1370,7 +1404,8 @@ async def test_reports_api_excludes_warmup_logs(async_client, db_setup):
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
     )
@@ -1439,7 +1474,8 @@ async def test_reports_api_applies_account_and_model_filters(async_client, db_se
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -1496,7 +1532,8 @@ async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_cli
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
     )
@@ -1554,7 +1591,8 @@ async def test_reports_api_summary_counts_range_accounts_and_calendar_days(async
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-03"},
     )
@@ -1636,7 +1674,8 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
     )
@@ -1650,7 +1689,8 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
         {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 16.7},
     ]
 
-    filtered_response = await async_client.get(
+    filtered_response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -1668,7 +1708,8 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
         {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 100.0}
     ]
 
-    unknown_filtered_response = await async_client.get(
+    unknown_filtered_response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -1688,7 +1729,8 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
         {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 100.0}
     ]
 
-    missing_useragent_filtered_response = await async_client.get(
+    missing_useragent_filtered_response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -1751,7 +1793,8 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
         )
         await session.commit()
 
-    response = await async_client.get(
+    response = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-03"},
     )
@@ -1847,7 +1890,8 @@ async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
         await session.commit()
 
     # Test filtering by single key-1
-    response1 = await async_client.get(
+    response1 = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -1863,7 +1907,8 @@ async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
     assert payload1["byAccount"][0]["requests"] == 1
 
     # Test filtering by multiple keys (key-1 and key-2)
-    response2 = await async_client.get(
+    response2 = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
@@ -1877,7 +1922,8 @@ async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
     assert payload2["summary"]["totalCostUsd"] == 1.50
 
     # Test filtering by non-matching key returns 0 metrics
-    response3 = await async_client.get(
+    response3 = await _get_after_report_fold(
+        async_client,
         "/api/reports",
         params={
             "start_date": "2026-06-01",
