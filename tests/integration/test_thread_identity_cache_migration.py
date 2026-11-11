@@ -122,6 +122,7 @@ def test_thread_cache_migration_replay_preserves_caches_and_fold_state(migration
         with engine.connect() as connection:
             for name, table in tables.items():
                 assert list(connection.execute(select(table).order_by(*table.primary_key)).mappings()) == before[name]
+        run_upgrade(migration_url, "head", bootstrap_legacy=False)
         assert check_schema_drift(migration_url) == ()
     finally:
         engine.dispose()

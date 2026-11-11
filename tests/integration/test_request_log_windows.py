@@ -9,6 +9,8 @@ from app.core.auth.dashboard_access import guest_principal
 from app.core.auth.dependencies import validate_dashboard_session
 from app.db.models import ApiKey, RequestLog
 from app.db.session import SessionLocal
+from app.modules.accounts.usage_rollup import FOLD_LAG
+from app.modules.reports.rollup import run_report_fold_pass
 from app.modules.request_logs import api as logs_api
 from app.modules.request_logs import repository as logs_repository
 
@@ -133,6 +135,7 @@ async def test_report_key_catalog_keeps_old_deleted_keys_and_never_leaks_cached_
             ]
         )
         await session.commit()
+    await run_report_fold_pass(now=datetime(2020, 1, 8) + FOLD_LAG)
     params = {"start_date": "2020-01-01", "end_date": "2020-01-07", "timezone": "UTC", "api_key_id": "current"}
     admin = await async_client.get("/api/reports/options", params=params)
     assert admin.status_code == 200
