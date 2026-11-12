@@ -1677,7 +1677,6 @@ class RequestLogsRepository:
                 RequestLog.source.ilike(search_pattern),
                 RequestLog.status.ilike(search_pattern),
                 RequestLog.error_code.ilike(search_pattern),
-                RequestLog.error_message.ilike(search_pattern),
                 cast(RequestLog.requested_at, String).ilike(search_pattern),
                 cast(RequestLog.input_tokens, String).ilike(search_pattern),
                 cast(RequestLog.output_tokens, String).ilike(search_pattern),
@@ -1692,6 +1691,7 @@ class RequestLogsRepository:
                 search_conditions.append(ApiKey.name.ilike(search_pattern))
             if include_sensitive_metadata:
                 search_conditions.append(RequestLog.client_ip.ilike(search_pattern))
+                search_conditions.append(RequestLog.error_message.ilike(search_pattern))
             if include_account_identity:
                 # Account emails are redacted for principals without account
                 # write access; matching on them would be a membership oracle.

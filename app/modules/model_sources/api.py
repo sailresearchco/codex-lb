@@ -3,8 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, Request, Response
 
 from app.core.audit.service import AuditActor, AuditService, AuditTarget
-from app.core.auth.dashboard_access import DashboardPrincipal
+from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
+    require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
@@ -26,7 +27,9 @@ router = APIRouter(
 )
 
 
-@router.get("/", response_model=ModelSourcesResponse)
+@router.get(
+    "/", response_model=ModelSourcesResponse, dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))]
+)
 async def list_model_sources(
     context: ModelSourcesContext = Depends(get_model_sources_context),
 ) -> ModelSourcesResponse:

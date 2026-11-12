@@ -4,7 +4,9 @@ from typing import Literal, cast
 
 from fastapi import APIRouter, Body, Depends, Query
 
+from app.core.auth.dashboard_access import Permission
 from app.core.auth.dependencies import (
+    require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
@@ -44,7 +46,11 @@ router = APIRouter(
 )
 
 
-@router.get("", response_model=AutomationJobsListResponse)
+@router.get(
+    "",
+    response_model=AutomationJobsListResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def list_automations(
     limit: int = Query(default=25, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
@@ -71,7 +77,11 @@ async def list_automations(
     )
 
 
-@router.get("/options", response_model=AutomationJobFilterOptionsResponse)
+@router.get(
+    "/options",
+    response_model=AutomationJobFilterOptionsResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def list_automation_filter_options(
     search: str | None = Query(default=None),
     account_id: list[str] | None = Query(default=None, alias="accountId"),
@@ -95,7 +105,11 @@ async def list_automation_filter_options(
     )
 
 
-@router.get("/runs", response_model=AutomationRunsListResponse)
+@router.get(
+    "/runs",
+    response_model=AutomationRunsListResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def list_automations_runs(
     limit: int = Query(default=25, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
@@ -124,7 +138,11 @@ async def list_automations_runs(
     )
 
 
-@router.get("/runs/options", response_model=AutomationRunFilterOptionsResponse)
+@router.get(
+    "/runs/options",
+    response_model=AutomationRunFilterOptionsResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def list_automation_run_filter_options(
     search: str | None = Query(default=None),
     account_id: list[str] | None = Query(default=None, alias="accountId"),
@@ -150,7 +168,11 @@ async def list_automation_run_filter_options(
     )
 
 
-@router.get("/runs/{run_id}/details", response_model=AutomationRunDetailsResponse)
+@router.get(
+    "/runs/{run_id}/details",
+    response_model=AutomationRunDetailsResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def get_automation_run_details(
     run_id: str,
     context: AutomationsContext = Depends(get_automations_context),
@@ -251,7 +273,11 @@ async def run_automation_now(
     return _to_run_response(run)
 
 
-@router.get("/{automation_id}/runs", response_model=AutomationRunsListResponse)
+@router.get(
+    "/{automation_id}/runs",
+    response_model=AutomationRunsListResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def list_automation_runs(
     automation_id: str,
     limit: int = Query(default=20, ge=1, le=200),
