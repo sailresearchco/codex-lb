@@ -673,7 +673,27 @@ async def test_first_password_setup_is_compare_and_set(async_client, app_instanc
 
 
 @pytest.mark.asyncio
-async def test_concurrent_first_password_setups_admit_exactly_one(async_client, app_instance):
+async def test_concurrent_first_password_setups_admit_exactly_one(async_client, app_instance, monkeypatch):
+    from app.modules.dashboard_auth import service as auth_service
+
+    # Exercise the database compare-and-set race after password admission.
+    # Real overlapping bcrypt jobs now receive a separately tested busy429.
+    hashes = {
+        password: await auth_service.hash_password_async(password)
+        for password in ("first-password-1", "second-password-2")
+    }
+    both_ready = asyncio.Event()
+    arrivals = 0
+
+    async def prepared_hash(password: str) -> str:
+        nonlocal arrivals
+        arrivals += 1
+        if arrivals == 2:
+            both_ready.set()
+        await asyncio.wait_for(both_ready.wait(), 2)
+        return hashes[password]
+
+    monkeypatch.setattr(auth_service, "hash_password_async", prepared_hash)
     async with _second_client(app_instance) as other:
         first, second = await asyncio.gather(
             async_client.post("/api/dashboard-auth/password/setup", json={"password": "first-password-1"}),
