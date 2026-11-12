@@ -27,7 +27,7 @@ from app.core.balancer import (
 )
 from app.core.balancer.logic import DRAIN_PRIMARY_THRESHOLD_PCT, PROBE_QUIET_SECONDS
 from app.core.usage.quota import apply_usage_quota
-from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, UsageHistory
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy.load_balancer import (
     RuntimeState,
@@ -55,6 +55,84 @@ def test_select_account_picks_lowest_used_percent():
     result = select_account(states, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
+
+
+@pytest.mark.parametrize(
+    "routing_strategy",
+    [
+        "usage_weighted",
+        "round_robin",
+        "capacity_weighted",
+        "relative_availability",
+        "fill_first",
+        "sequential_drain",
+        "reset_drain",
+        "single_account",
+    ],
+)
+@pytest.mark.parametrize("selection_seed", [None, "fresh-thread-seed"])
+def test_included_allowance_precedes_discretionary_routing(monkeypatch, routing_strategy, selection_seed):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    exhausted = AccountState(
+        "a-exhausted",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=100.0,
+        secondary_reset_at=int(now + 3600),
+        health_tier=HEALTH_TIER_HEALTHY,
+        routing_policy="burn_first",
+        included_allowance_exhausted=True,
+    )
+    included = AccountState(
+        "z-included",
+        AccountStatus.ACTIVE,
+        used_percent=95.0,
+        secondary_used_percent=95.0,
+        secondary_reset_at=int(now + 604800),
+        health_tier=HEALTH_TIER_DRAINING,
+        routing_policy=ROUTING_POLICY_PRESERVE,
+    )
+
+    result = _select_account_preferring_budget_safe(
+        [exhausted, included],
+        prefer_earlier_reset=True,
+        routing_strategy=routing_strategy,
+        routing_costs_by_account_id={"z-included": RoutingCost(total=100.0, reason="cold_start_outside_work")},
+        budget_threshold_pct=95.0,
+        selection_seed=selection_seed,
+        prefer_included_allowance=True,
+    )
+
+    assert result.account is included
+
+
+@pytest.mark.parametrize("unavailable_reason", ["paused", "cooldown", "backoff", "expired_reauth"])
+def test_included_allowance_does_not_suppress_eligible_fallback(monkeypatch, unavailable_reason):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    included = AccountState("included", AccountStatus.ACTIVE)
+    if unavailable_reason == "paused":
+        included.status = AccountStatus.PAUSED
+    elif unavailable_reason == "cooldown":
+        included.cooldown_until = now + 60
+    elif unavailable_reason == "backoff":
+        included.error_count = 5
+        included.last_error_at = now
+    else:
+        included.status = AccountStatus.REAUTH_REQUIRED
+        included.access_token_expires_at = now - 60
+    exhausted = AccountState("exhausted", AccountStatus.ACTIVE, included_allowance_exhausted=True)
+
+    result = _select_account_preferring_budget_safe(
+        [included, exhausted],
+        prefer_earlier_reset=False,
+        routing_strategy="capacity_weighted",
+        budget_threshold_pct=95.0,
+        prefer_included_allowance=True,
+    )
+
+    assert result.account is exhausted
 
 
 def test_select_account_applies_planner_cold_start_penalty():
@@ -2287,6 +2365,137 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     from datetime import timezone
 
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
+
+
+@pytest.mark.parametrize(
+    ("primary_used", "secondary_used", "reset_offset", "exhausted"),
+    [
+        (None, None, 3600, False),
+        (99.0, 99.0, 3600, False),
+        (100.0, 10.0, 3600, True),
+        (10.0, 100.0, 3600, True),
+        (None, 100.0, 3600, True),
+        (100.0, None, 3600, True),
+        (100.0, 100.0, -1, False),
+        (100.0, 100.0, 0, False),
+    ],
+)
+def test_included_allowance_uses_normalized_reported_windows(primary_used, secondary_used, reset_offset, exhausted):
+    now = 1_700_000_000.0
+
+    def usage(window, used_percent):
+        if used_percent is None:
+            return None
+        return _make_test_usage(
+            window=window,
+            used_percent=used_percent,
+            reset_at=int(now + reset_offset),
+            recorded_at=_epoch_to_naive_utc(now - 5),
+            credits_balance=25.0,
+        )
+
+    state = _state_from_account(
+        account=_make_test_account(),
+        primary_entry=usage("primary", primary_used),
+        secondary_entry=usage("secondary", secondary_used),
+        runtime=RuntimeState(),
+        now=now,
+        soft_drain_enabled=False,
+    )
+
+    assert state.included_allowance_exhausted is exhausted
+    assert state.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.parametrize("pressure_kind", ["inflight", "lease"])
+def test_included_allowance_ignores_local_pressure(pressure_kind):
+    now = 1_700_000_000.0
+    runtime = RuntimeState(inflight_streams=1) if pressure_kind == "inflight" else RuntimeState(leased_tokens=1000)
+    state = _state_from_account(
+        account=_make_test_account(),
+        primary_entry=_make_test_usage(window="primary", used_percent=99.0, reset_at=int(now + 300)),
+        secondary_entry=_make_test_usage(used_percent=99.0, reset_at=int(now + 604800)),
+        runtime=runtime,
+        now=now,
+        routing_tunables=RoutingTunables(),
+        soft_drain_enabled=False,
+    )
+
+    assert state.used_percent == 100.0
+    assert state.secondary_used_percent == 100.0
+    assert state.included_allowance_exhausted is False
+
+
+@pytest.mark.parametrize("used_percent", [25.0, 100.0])
+@pytest.mark.parametrize("plan_type", ["pro", "free"])
+def test_included_allowance_uses_model_quota_instead_of_standard_monthly(used_percent, plan_type):
+    now = 1_700_000_000.0
+    account = _make_test_account(plan_type=plan_type)
+    additional = AdditionalUsageHistory(
+        account_id=account.id,
+        quota_key="model-quota",
+        limit_name="model-quota",
+        metered_feature="model-quota",
+        window="primary",
+        used_percent=used_percent,
+        reset_at=int(now + 3600),
+        window_minutes=300,
+        recorded_at=_epoch_to_naive_utc(now - 5),
+    )
+    states, _ = _build_states(
+        accounts=[account],
+        latest_primary={account.id: additional},
+        latest_secondary={},
+        latest_monthly={account.id: _make_test_usage(window="monthly", used_percent=100.0)},
+        runtime={},
+        now=now,
+        ignore_standard_quota_account_ids=frozenset({account.id}),
+        soft_drain_enabled=False,
+    )
+
+    assert states[0].ignore_standard_quota is True
+    assert states[0].included_allowance_exhausted is (used_percent >= 100.0)
+
+
+@pytest.mark.parametrize(
+    ("window", "plan_type", "window_minutes"),
+    [("primary", "promax", 10080), ("primary", "free", 10080), ("monthly", "free", 43200)],
+)
+@pytest.mark.parametrize("reset_offset", [-1, 3600])
+def test_included_allowance_normalizes_weekly_only_and_monthly_windows(window, plan_type, window_minutes, reset_offset):
+    now = 1_700_000_000.0
+    account = _make_test_account(plan_type=plan_type)
+    usage = _make_test_usage(
+        window=window,
+        used_percent=100.0,
+        reset_at=int(now + reset_offset),
+        window_minutes=window_minutes,
+        recorded_at=_epoch_to_naive_utc(now - 5),
+        credits_balance=25.0,
+    )
+    states, _ = _build_states(
+        accounts=[account],
+        latest_primary={account.id: usage} if window == "primary" else {},
+        latest_secondary={},
+        latest_monthly={account.id: usage} if window == "monthly" else {},
+        runtime={},
+        now=now,
+        soft_drain_enabled=False,
+    )
+    assert states[0].included_allowance_exhausted is (reset_offset > 0)
+
+
+def test_included_allowance_ignores_legacy_free_primary_window():
+    now = 1_700_000_000.0
+    state = _state_from_account(
+        account=_make_test_account(plan_type="free"),
+        primary_entry=_make_test_usage(window="primary", used_percent=100.0, reset_at=int(now + 300)),
+        secondary_entry=_make_test_usage(used_percent=20.0, reset_at=int(now + 604800)),
+        runtime=RuntimeState(),
+        now=now,
+        soft_drain_enabled=False,
+    )
+    assert state.included_allowance_exhausted is False
 
 
 @pytest.mark.parametrize("routing_strategy", ["capacity_weighted", "relative_availability"])
@@ -5233,6 +5442,233 @@ def test_all_primary_pressured_fallback_skips_unavailable_account():
 
     assert result.account is not None
     assert result.account.account_id == "available"
+
+
+@pytest.mark.parametrize("exhausted_policy", ["normal", "burn_first"])
+def test_budget_safe_wrapper_prefers_included_allowance_over_shortcuts(exhausted_policy):
+    included = AccountState(
+        "included",
+        AccountStatus.ACTIVE,
+        used_percent=99.0,
+        secondary_used_percent=95.0,
+        health_tier=HEALTH_TIER_DRAINING,
+        routing_policy=ROUTING_POLICY_PRESERVE,
+    )
+    exhausted = AccountState(
+        "credits",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=100.0,
+        routing_policy=exhausted_policy,
+        included_allowance_exhausted=True,
+    )
+
+    result = _select_account_preferring_budget_safe(
+        [exhausted, included],
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        prefer_included_allowance=True,
+    )
+
+    assert result.account is included
+
+
+@pytest.mark.parametrize(
+    ("unavailable_reason", "included_count"),
+    [("paused", 1), ("cooldown", 1), ("backoff", 1), ("backoff", 2)],
+)
+def test_budget_safe_wrapper_unavailable_included_allowance_keeps_credit_fallback(
+    monkeypatch, unavailable_reason, included_count
+):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    included_states = [
+        AccountState(f"included-{index}", AccountStatus.ACTIVE, used_percent=10.0) for index in range(included_count)
+    ]
+    for state in included_states:
+        if unavailable_reason == "paused":
+            state.status = AccountStatus.PAUSED
+        elif unavailable_reason == "cooldown":
+            state.cooldown_until = now + 60
+        else:
+            state.error_count = 5
+            state.last_error_at = now
+    exhausted = AccountState(
+        "credits",
+        AccountStatus.ACTIVE,
+        used_percent=98.0,
+        secondary_used_percent=100.0,
+        included_allowance_exhausted=True,
+    )
+
+    result = _select_account_preferring_budget_safe(
+        [*included_states, exhausted],
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        prefer_included_allowance=True,
+    )
+
+    assert result.account is exhausted
+
+
+def test_budget_safe_wrapper_all_exhausted_preserves_burn_first():
+    burn_first = AccountState(
+        "burn-first",
+        AccountStatus.ACTIVE,
+        used_percent=99.0,
+        secondary_used_percent=100.0,
+        routing_policy="burn_first",
+        included_allowance_exhausted=True,
+    )
+    budget_safe = AccountState(
+        "budget-safe",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=100.0,
+        included_allowance_exhausted=True,
+    )
+
+    result = _select_account_preferring_budget_safe(
+        [budget_safe, burn_first],
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        prefer_included_allowance=True,
+    )
+
+    assert result.account is burn_first
+
+
+@pytest.mark.parametrize(
+    ("routing_strategy", "prefer_earlier_reset", "expected_id"),
+    [
+        ("usage_weighted", False, "lower-usage"),
+        ("usage_weighted", True, "earlier-reset"),
+        ("capacity_weighted", True, "earlier-reset"),
+        ("round_robin", False, "earlier-reset"),
+    ],
+)
+def test_budget_safe_wrapper_preserves_strategy_within_included_allowance(
+    monkeypatch, routing_strategy, prefer_earlier_reset, expected_id
+):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    states = [
+        AccountState(
+            "earlier-reset",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=80.0,
+            secondary_reset_at=int(now + 3600),
+            last_selected_at=now - 100,
+        ),
+        AccountState(
+            "lower-usage",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            secondary_used_percent=10.0,
+            secondary_reset_at=int(now + 4 * 86400),
+            last_selected_at=now - 10,
+        ),
+        AccountState(
+            "credits",
+            AccountStatus.ACTIVE,
+            used_percent=1.0,
+            secondary_used_percent=100.0,
+            secondary_reset_at=int(now + 60),
+            routing_policy="burn_first",
+            included_allowance_exhausted=True,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=prefer_earlier_reset,
+        routing_strategy=routing_strategy,
+        budget_threshold_pct=95.0,
+        prefer_included_allowance=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == expected_id
+
+
+def test_budget_safe_wrapper_existing_ranking_does_not_prefer_included_allowance():
+    included = AccountState("included", AccountStatus.ACTIVE, used_percent=20.0, secondary_used_percent=20.0)
+    exhausted = AccountState(
+        "credits",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=100.0,
+        routing_policy="burn_first",
+        included_allowance_exhausted=True,
+    )
+
+    result = _select_account_preferring_budget_safe(
+        [included, exhausted],
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        prefer_included_allowance=False,
+    )
+
+    assert result.account is exhausted
+
+
+@pytest.mark.parametrize("probe_due", [True, False])
+def test_budget_safe_wrapper_included_preference_preserves_probe_cadence(monkeypatch, probe_due):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    probing = AccountState(
+        "included-probe",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=10.0,
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=now - PROBE_QUIET_SECONDS if probe_due else now - 1,
+    )
+    exhausted = AccountState(
+        "healthy-credits",
+        AccountStatus.ACTIVE,
+        used_percent=10.0,
+        secondary_used_percent=100.0,
+        health_tier=HEALTH_TIER_HEALTHY,
+        included_allowance_exhausted=True,
+    )
+
+    result = _select_account_preferring_budget_safe(
+        [probing, exhausted],
+        prefer_earlier_reset=False,
+        routing_strategy="capacity_weighted",
+        budget_threshold_pct=95.0,
+        prefer_included_allowance=True,
+    )
+
+    assert result.account is (probing if probe_due else exhausted)
+
+
+def test_budget_safe_wrapper_included_preference_leaves_opportunistic_routing_unchanged():
+    included = AccountState("included", AccountStatus.ACTIVE, used_percent=20.0, secondary_used_percent=20.0)
+    exhausted = AccountState(
+        "credits",
+        AccountStatus.ACTIVE,
+        used_percent=30.0,
+        secondary_used_percent=100.0,
+        included_allowance_exhausted=True,
+    )
+
+    result = _select_account_preferring_budget_safe(
+        [included, exhausted],
+        prefer_earlier_reset=False,
+        routing_strategy="fill_first",
+        budget_threshold_pct=95.0,
+        traffic_class="opportunistic",
+        prefer_included_allowance=True,
+    )
+
+    assert result.account is exhausted
 
 
 def test_budget_safe_selection_preserves_secondary_first_when_all_primary_safe():

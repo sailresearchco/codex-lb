@@ -53,6 +53,8 @@ Account pages display each window as **percent remaining**; the sticky reallocat
 
 When enabled and several accounts are otherwise eligible, selection is restricted to the accounts whose selected quota window (5h or weekly) resets soonest. Weekly resets are compared in whole-day buckets; when the selected window has no known reset time, the other window is used as a fallback. The preference applies to the `Capacity weighted`, `Usage weighted`, and `Fill first` strategies; the fixed-order and draw-based strategies (`Round robin`, `Relative availability`, `Sequential drain`, `Reset drain`, `Single account`) ignore it.
 
+For fresh foreground assignments, the selector first prefers eligible accounts whose applicable included allowance is not exhausted, then applies the configured strategy and reset preference. Existing conversation affinity and account-owned continuation state retain their current behavior, so an established conversation may continue using its owner's extra credits. Recovery probes and opportunistic burn policies retain their existing rules. If no eligible account has included allowance, existing credit fallback remains available. This preference does not redeem resets or purchase credits.
+
 ### Relative latency weighting
 
 The `Capacity weighted` and `Relative availability` strategies also discount accounts that are slower than their siblings, down to half of their normal weight, using two replica-local signals measured from the last hour of successful, unqueued, single-attempt turns:

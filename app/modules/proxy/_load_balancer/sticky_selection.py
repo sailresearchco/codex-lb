@@ -20,6 +20,7 @@ from app.core.balancer import (
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
+    partition_account_availability,
     select_account,
 )
 from app.core.clock import Clock
@@ -1436,6 +1437,8 @@ async def _select_with_stickiness(
         return _StickySelectionOutcome(
             selection=_select_account_preferring_budget_safe(
                 states,
+                now=clock.time(),
+                prefer_included_allowance=True,
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=prefer_earlier_reset_window,
                 routing_strategy=routing_strategy,
@@ -1526,6 +1529,8 @@ async def _select_with_stickiness(
     def _choose_from(candidates: list[AccountState], *, selection_seed: str | None = None) -> SelectionResult:
         return _select_account_preferring_budget_safe(
             candidates,
+            now=clock.time(),
+            prefer_included_allowance=not existing and initial_preferred_account_id is None,
             selection_seed=selection_seed,
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
@@ -2239,6 +2244,7 @@ def _state_above_sticky_budget_threshold(
 def _select_account_preferring_budget_safe(
     states: Iterable[AccountState],
     *,
+    now: float | None = None,
     prefer_earlier_reset: bool,
     prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
     routing_strategy: RoutingStrategy,
@@ -2255,6 +2261,7 @@ def _select_account_preferring_budget_safe(
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
     selection_seed: str | None = None,
+    prefer_included_allowance: bool = False,
 ) -> SelectionResult:
     state_list = list(states)
     if selection_seed is None and routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
@@ -2270,6 +2277,7 @@ def _select_account_preferring_budget_safe(
         # carrying them.
         recovery_probe = select_account(
             state_list,
+            now=now,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -2285,6 +2293,24 @@ def _select_account_preferring_budget_safe(
         )
         if recovery_probe.account is not None:
             return recovery_probe
+    if prefer_included_allowance and traffic_class == TRAFFIC_CLASS_FOREGROUND:
+        # Only fresh choices opt in. Retention checks, preferred owners, and
+        # existing affinity keep their established ranking and failure rules.
+        available, _ = partition_account_availability(
+            state_list,
+            now=now,
+            ignore_standard_quota=ignore_standard_quota,
+        )
+        if available:
+            included = [state for state in available if not state.included_allowance_exhausted]
+            if routing_strategy not in ("sequential_drain", "reset_drain", "single_account") and any(
+                state.health_tier == HEALTH_TIER_HEALTHY for state in available
+            ):
+                # Due probes were admitted above. A non-due probe cannot become
+                # an ordinary admission just because the healthy owner uses
+                # credits; reservation still evaluates the complete pool.
+                included = [state for state in included if state.health_tier != HEALTH_TIER_PROBING]
+            state_list = included or available
     state_budget_threshold = (
         (
             lambda state: _state_above_sticky_budget_threshold(
@@ -2304,6 +2330,7 @@ def _select_account_preferring_budget_safe(
         ]
         return select_account(
             budget_safe_states or state_list,
+            now=now,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -2324,6 +2351,7 @@ def _select_account_preferring_budget_safe(
     if burn_first_states:
         burn_first = select_account(
             burn_first_states,
+            now=now,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -2350,6 +2378,7 @@ def _select_account_preferring_budget_safe(
         selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list
         preferred = select_account(
             selection_pool,
+            now=now,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -2371,6 +2400,7 @@ def _select_account_preferring_budget_safe(
     if routing_strategy == "usage_weighted" and state_list:
         return select_account(
             state_list,
+            now=now,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -2386,6 +2416,7 @@ def _select_account_preferring_budget_safe(
         )
     return select_account(
         state_list,
+        now=now,
         prefer_earlier_reset=prefer_earlier_reset,
         prefer_earlier_reset_window=prefer_earlier_reset_window,
         routing_strategy=routing_strategy,
