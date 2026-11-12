@@ -94,6 +94,12 @@ class DashboardService:
     ) -> DashboardOverviewResponse:
         now = utcnow()
         overview_timeframe = resolve_overview_timeframe(timeframe_key)
+        bucket_since = now - timedelta(minutes=overview_timeframe.window_minutes)
+        bucket_query_since = align_bucket_window_start(bucket_since, overview_timeframe.bucket_seconds)
+        previous_window_start = bucket_since - timedelta(minutes=overview_timeframe.window_minutes)
+        await self._repo.require_history_coverage(
+            [(bucket_query_since, now), (previous_window_start, bucket_since)], now=now
+        )
         accounts = await self._repo.list_accounts()
         account_ids = [account.id for account in accounts]
         primary_usage = await self._repo.latest_usage_by_account("primary")
@@ -123,11 +129,6 @@ class DashboardService:
             secondary_rows_raw,
         )
 
-        bucket_since = now - timedelta(minutes=overview_timeframe.window_minutes)
-        bucket_query_since = align_bucket_window_start(
-            bucket_since,
-            overview_timeframe.bucket_seconds,
-        )
         bucket_rows = await self._repo.aggregate_logs_by_bucket(
             bucket_query_since,
             overview_timeframe.bucket_seconds,
@@ -143,7 +144,6 @@ class DashboardService:
             bucket_count=overview_timeframe.bucket_count,
             conversation_rows=conversation_bucket_rows,
         )
-        previous_window_start = bucket_since - timedelta(minutes=overview_timeframe.window_minutes)
         activity_aggregate = await self._repo.aggregate_activity_between(bucket_since, now)
         previous_activity_aggregate = await self._repo.aggregate_activity_between(previous_window_start, bucket_since)
         top_error = await self._repo.top_error_between(bucket_since, now)

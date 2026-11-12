@@ -2204,12 +2204,12 @@ def _to_v1_usage_limit_response(limit: ApiKeySelfLimitData) -> V1UsageLimitRespo
 async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLimitStatusPayloadData:
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session))
-        usage = await service.get_key_usage_summary_for_self(api_key.id)
+        limits = await service.get_key_limits_for_self(api_key.id)
 
-    if usage is None:
+    if limits is None:
         raise ProxyAuthError("Invalid API key")
 
-    key_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
+    key_limits = [_to_v1_usage_limit_response(limit) for limit in limits]
     primary_credit_limit = _select_codex_usage_limit(key_limits, "5h") or _select_codex_usage_limit(key_limits, "daily")
     secondary_credit_limit = _select_codex_usage_limit(key_limits, "7d") or _select_codex_usage_limit(
         key_limits, "weekly"

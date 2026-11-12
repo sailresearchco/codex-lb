@@ -39,6 +39,11 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_account_usage_rollup.py \
 	tests/integration/test_usage_history_coverage.py \
 	tests/integration/test_account_usage_countable_index_migration.py \
+	tests/integration/test_api_key_history_coverage.py \
+	tests/integration/test_dashboard_history_coverage.py \
+	tests/integration/test_earliest_activity.py \
+	tests/integration/test_self_usage_read_budget.py \
+	tests/integration/test_api_key_countable_index_migration.py \
 	tests/integration/test_account_rollup_rekey.py \
 	tests/integration/test_account_deletion_background.py \
 	tests/integration/test_request_usage_time_rollup.py \

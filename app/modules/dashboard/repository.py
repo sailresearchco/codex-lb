@@ -12,15 +12,18 @@ from app.core.usage.types import BucketConversationAggregate, BucketModelAggrega
 from app.db.models import (
     Account,
     AccountLimitWarmup,
+    AccountUsageRollupState,
     ApiKey,
     DashboardSettings,
     RequestLog,
     UsageHistory,
 )
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.usage_time_rollup_read import ceil_to_grid, floor_to_grid
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
+from app.modules.usage.read_coverage import MAX_RAW_TAIL, require_bounded_raw_history
 from app.modules.usage.repository import (
     AdditionalUsageRepository,
     NormalizedUsageWindow,
@@ -82,6 +85,25 @@ class DashboardRepository:
         self._additional_usage_repo = AdditionalUsageRepository(session)
         self._limit_warmup_repo = LimitWarmupRepository(session)
         self._settings_repo = SettingsRepository(session)
+
+    async def require_history_coverage(self, windows: list[tuple[datetime, datetime]], *, now: datetime) -> None:
+        state = (
+            await self._session.execute(
+                select(
+                    AccountUsageRollupState.hourly_folded_through,
+                    AccountUsageRollupState.conversation_folded_through,
+                ).where(AccountUsageRollupState.id == 1)
+            )
+        ).one_or_none()
+        watermark = min(state) if state is not None else datetime.min
+        excess_ranges: list[tuple[datetime | None, datetime]] = []
+        for start, end in windows:
+            # Both projections must cover historical whole hours. Leading
+            # partial hours and the exact live tail retain their raw bounds.
+            high = min(watermark, floor_to_grid(end, 3600))
+            tail_start = start if high <= ceil_to_grid(start, 3600) else high
+            excess_ranges.append((tail_start, min(end, now) - MAX_RAW_TAIL))
+        await require_bounded_raw_history(self._session, excess_ranges, code="usage_history_building")
 
     async def list_accounts(self) -> list[Account]:
         return await self._accounts_repo.list_accounts()

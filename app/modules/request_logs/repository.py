@@ -902,7 +902,25 @@ class RequestLogsRepository:
         return min(counts, key=lambda code: (-counts[code], code)) or None
 
     async def earliest_activity_at(self) -> datetime | None:
-        stmt = select(func.min(RequestLog.requested_at)).where(self._exclude_warmup_clause())
+        # Seek once per kind through idx_logs_request_kind_time instead of
+        # walking an arbitrarily large warmup prefix in timestamp order.
+        # Keep enumeration and minima in one statement snapshot so an unknown
+        # kind inserted concurrently cannot fall between separate probes.
+        kinds = select(func.min(RequestLog.request_kind).label("kind")).cte("activity_kinds", recursive=True)
+        next_kind = (
+            select(func.min(RequestLog.request_kind))
+            .where(RequestLog.request_kind > kinds.c.kind)
+            .correlate(kinds)
+            .scalar_subquery()
+        )
+        kinds = kinds.union_all(select(next_kind).select_from(kinds).where(kinds.c.kind.is_not(None)))
+        first_in_kind = (
+            select(func.min(RequestLog.requested_at))
+            .where(RequestLog.request_kind == kinds.c.kind)
+            .correlate(kinds)
+            .scalar_subquery()
+        )
+        stmt = select(func.min(first_in_kind)).select_from(kinds).where(kinds.c.kind.not_in(WARMUP_REQUEST_KINDS))
         result = await self._session.execute(stmt)
         value = result.scalar_one_or_none()
         raw_earliest = value if isinstance(value, datetime) else None

@@ -27,7 +27,7 @@ from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
-from app.db.request_log_predicates import countable_account_usage_clause
+from app.db.request_log_predicates import countable_account_usage_clause, countable_api_key_usage_clause
 
 
 class Base(DeclarativeBase):
@@ -2953,6 +2953,12 @@ Index(
 )
 Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
+Index(
+    "idx_logs_countable_api_key_time",
+    RequestLog.requested_at,
+    sqlite_where=countable_api_key_usage_clause(RequestLog.__table__),
+    postgresql_where=countable_api_key_usage_clause(RequestLog.__table__),
+)
 Index("idx_logs_request_kind_time", RequestLog.request_kind, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
     "idx_logs_account_kind_deleted_latest",

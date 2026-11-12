@@ -705,6 +705,9 @@ async def test_statistics_survive_retention_pruning_folded_raw(db_setup, monkeyp
 async def test_dashboard_overview_json_is_identical_before_and_after_fold(async_client, db_setup, monkeypatch):
     """API-level equivalence: the exact overview JSON must not change when
     the same window flips from raw-scanned to rollup-served."""
+    # Exercise the permitted recent raw tail using the current two-hour lag,
+    # independently of this module's historical 24-hour parity corpus.
+    monkeypatch.setattr("app.modules.accounts.usage_time_rollup.FOLD_LAG", timedelta(hours=2))
     fixed_now = utcnow().replace(microsecond=0)
     monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
 
@@ -713,7 +716,7 @@ async def test_dashboard_overview_json_is_identical_before_and_after_fold(async_
         session.add_all(
             [
                 _log(
-                    fixed_now - timedelta(days=2, hours=hour, minutes=13),
+                    fixed_now - timedelta(hours=3, minutes=13 + hour),
                     request_id_suffix=f"api{hour}",
                     api_key_id=None,
                     service_tier="flex" if hour % 2 else None,
