@@ -553,6 +553,8 @@ class ApiKeysService:
 
     async def list_keys(self) -> list[ApiKeyData]:
         rows = await self._repository.list_all()
+        if not rows:
+            return []
         usage_summary_by_key = await self._repository.list_usage_summary_by_key()
 
         pooled_by_key: dict[str, PooledCreditData] = {}
@@ -1297,6 +1299,19 @@ class ApiKeysService:
 
     async def get_key_usage_summary_for_self(self, key_id: str) -> ApiKeySelfUsageData | None:
         """Return usage summary + current limits for a single key (self-service lookup)."""
+        limits = await self.get_key_limits_for_self(key_id)
+        if limits is None:
+            return None
+        usage = await self._repository.get_usage_summary_by_key_id(key_id)
+        return ApiKeySelfUsageData(
+            request_count=usage.request_count,
+            total_tokens=usage.total_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            total_cost_usd=usage.total_cost_usd,
+            limits=limits,
+        )
+
+    async def get_key_limits_for_self(self, key_id: str) -> list[ApiKeySelfLimitData] | None:
         row = await self._repository.get_by_id(key_id)
         if row is None:
             return None
@@ -1308,8 +1323,7 @@ class ApiKeysService:
         if refreshed is None:
             return None
 
-        usage = await self._repository.get_usage_summary_by_key_id(key_id)
-        limits = [
+        return [
             ApiKeySelfLimitData(
                 limit_type=limit.limit_type.value,
                 limit_window=limit.limit_window.value,
@@ -1322,13 +1336,6 @@ class ApiKeysService:
             )
             for limit in refreshed.limits
         ]
-        return ApiKeySelfUsageData(
-            request_count=usage.request_count,
-            total_tokens=usage.total_tokens,
-            cached_input_tokens=usage.cached_input_tokens,
-            total_cost_usd=usage.total_cost_usd,
-            limits=limits,
-        )
 
     async def get_key_usage_7d(self, key_id: str) -> ApiKeyUsage7DayData | None:
         row = await self._repository.get_by_id(key_id)

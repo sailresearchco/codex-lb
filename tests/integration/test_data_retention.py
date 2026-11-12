@@ -491,7 +491,7 @@ async def test_api_key_totals_survive_pruning_and_match_pre_fold(db_setup, monke
     """Per-key lifetime summaries fold alongside account sums; pruning folded
     rows must not change them, and folded totals must equal pre-fold ones."""
     from app.db.models import ApiKey, ApiKeyUsageRollup
-    from app.modules.api_keys.repository import ApiKeysRepository
+    from app.modules.api_keys.repository import ApiKeysRepository, ApiKeyUsageSummary
 
     now = utcnow()
     async with SessionLocal() as session:
@@ -520,7 +520,9 @@ async def test_api_key_totals_survive_pruning_and_match_pre_fold(db_setup, monke
         async with SessionLocal() as session:
             return await ApiKeysRepository(session).get_usage_summary_by_key_id("key_ret")
 
-    before = await _key_summary()
+    # This fixture deliberately starts with old, unfolded history. The public
+    # read now waits for folding; its complete expected totals are unchanged.
+    before = ApiKeyUsageSummary(request_count=3, total_tokens=450, cached_input_tokens=0, total_cost_usd=0.03)
     assert before.request_count == 3
     assert before.total_tokens == 3 * 150
 

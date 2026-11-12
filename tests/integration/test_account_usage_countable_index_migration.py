@@ -54,7 +54,7 @@ def test_countable_index_upgrade_downgrade_retry_preserves_history(migration_url
             )
             before = connection.execute(text("SELECT * FROM request_logs ORDER BY id")).all()
         for _ in range(2):
-            run_upgrade(migration_url, REVISION, bootstrap_legacy=False)
+            run_upgrade(migration_url, "head", bootstrap_legacy=False)
             indexes = {row["name"]: row for row in inspect(engine).get_indexes("request_logs")}
             assert indexes[INDEX]["column_names"] == COLUMNS
             assert check_schema_drift(migration_url) == ()
@@ -72,7 +72,7 @@ def test_countable_index_upgrade_downgrade_retry_preserves_history(migration_url
                     "AND request_kind NOT IN ('warmup', 'limit_warmup')"
                 )
             )
-        run_upgrade(migration_url, REVISION, bootstrap_legacy=False)
+        run_upgrade(migration_url, "head", bootstrap_legacy=False)
         assert check_schema_drift(migration_url) == ()
         with engine.begin() as connection:
             connection.execute(text(f"DROP INDEX {INDEX}"))
@@ -92,7 +92,7 @@ def test_countable_index_repairs_invalid_postgresql_build(migration_url):
             connection.execute(
                 text("UPDATE pg_index SET indisvalid=false WHERE indexrelid=to_regclass(:name)"), {"name": INDEX}
             )
-        run_upgrade(migration_url, REVISION, bootstrap_legacy=False)
+        run_upgrade(migration_url, "head", bootstrap_legacy=False)
         indexes = {row["name"]: row for row in inspect(engine).get_indexes("request_logs")}
         assert indexes[INDEX]["column_names"] == COLUMNS
         with engine.connect() as connection:

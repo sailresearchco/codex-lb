@@ -12,6 +12,7 @@ from app.db.models import Account, AccountStatus, ApiKey, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import AccountSummary
+from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
 from app.modules.dashboard.weekly_pace import _weekly_timing
 from app.modules.request_logs.conversation_summary import backfill_conversation_summaries
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -38,6 +39,13 @@ def _make_account(
         status=status,
         deactivation_reason=None,
     )
+
+
+async def _fold_overview_history(now: datetime) -> None:
+    while await run_hourly_fold_pass(now=now):
+        pass
+    while await run_conversation_fold_pass(now=now):
+        pass
 
 
 def test_weekly_credit_pace_timing_treats_naive_reset_as_utc():
@@ -351,6 +359,7 @@ async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_time
         )
         await session.commit()
 
+    await _fold_overview_history(now)
     response = await async_client.get("/api/dashboard/overview?timeframe=1d")
 
     assert response.status_code == 200
@@ -416,6 +425,7 @@ async def test_conversation_list_agrees_with_dashboard_activity_window(
         )
         await session.commit()
 
+    await _fold_overview_history(now)
     while await backfill_conversation_summaries():
         pass
     conversations_response = await async_client.get("/api/conversations", params={"since": since.isoformat()})
@@ -1198,6 +1208,7 @@ async def test_dashboard_overview_respects_selected_timeframe(
             requested_at=now - timedelta(days=2),
         )
 
+    await _fold_overview_history(now)
     response = await async_client.get(f"/api/dashboard/overview?timeframe={timeframe}")
     assert response.status_code == 200
     payload = response.json()

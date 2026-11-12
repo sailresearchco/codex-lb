@@ -16,6 +16,7 @@ from app.db.models import Account, AccountStatus, ApiKey, RequestKind, RequestLo
 from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup import lock_fold_state
+from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
 from app.modules.request_logs.conversation_summary import (
     backfill_conversation_summaries,
     capture_contributions,
@@ -1550,6 +1551,13 @@ async def test_conversation_timeframe_matches_dashboard_activity_under_fixed_clo
         )
         await session.commit()
         await _finish_summary_backfill()
+
+    # Overview waits for its historical projections; preserve the old rows so
+    # this still compares the exact conversation window after real folding.
+    while await run_hourly_fold_pass(now=fixed_now):
+        pass
+    while await run_conversation_fold_pass(now=fixed_now):
+        pass
 
     conversations_response = await async_client.get("/api/conversations", params={"timeframe": "7d"})
     dashboard_response = await async_client.get("/api/dashboard/overview", params={"timeframe": "7d"})

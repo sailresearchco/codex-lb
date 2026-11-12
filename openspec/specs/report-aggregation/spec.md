@@ -6,7 +6,7 @@ Governs how dashboard reports are assembled from permanent time-bucketed aggrega
 
 ### Requirement: Historical raw fallbacks require bounded read coverage
 
-Account lifetime usage reads, report cost reads, and report model, User-Agent,
+Account and API-key lifetime usage reads, dashboard overview reads, report cost reads, and report model, User-Agent,
 and API-key catalogs SHALL check for populated unfolded raw history before
 running their aggregates or distinct scans. Account reads SHALL reject countable
 live raw rows between their lifetime watermark and four hours before the current
@@ -15,6 +15,27 @@ predicate as a partial covering timestamp index, excluding warmup, deleted, and
 account-less history without scanning that excluded prefix. Unknown non-warmup
 kinds SHALL remain countable. History that the lifetime folder cannot count SHALL NOT cause a
 permanent building response when that folder leaves its watermark unchanged.
+API-key lifetime reads SHALL apply the same four-hour coverage allowance to their
+countable raw tail, including soft-deleted and account-detached requests with a
+key ID. Their probe and aggregate SHALL use a partial timestamp index with the
+same non-warmup, key-attributed predicate. An empty key inventory SHALL return
+an empty list without aggregating unrelated history. Missing coverage SHALL
+return `usage_history_building`; it SHALL NOT truncate lifetime totals.
+Dashboard overview reads SHALL require both hourly usage and conversation
+coverage for the selected and previous comparison windows. They SHALL reject
+populated unfolded tails older than four hours before each window end with
+`usage_history_building`, using indexed timestamp existence probes before
+aggregation. Covered whole hours and exact partial hours SHALL remain readable;
+request metrics SHALL continue including soft-deleted and account-less rows
+while conversation metrics preserve their existing eligibility rules.
+API-key self-service lifetime totals SHALL use the existing 15-second SQLite
+read budget after any expired-limit resets have committed. Codex API-key quota
+responses SHALL read current limits without aggregating lifetime request
+history; missing keys and keys with no configured limits SHALL remain distinct.
+Authentication, limit-reset writes, inference, and OAuth usage SHALL retain
+their existing execution paths. The overview earliest-activity lookup SHALL
+seek by request kind rather than scan excluded raw history, preserving unknown
+kinds, exact retained timestamps, and the existing hourly retention fallback.
 Report reads SHALL reject raw rows in an unfolded report segment earlier than
 four hours before the earlier of that segment's end and the current time.
 These checks SHALL use indexed timestamp-range existence probes, not raw

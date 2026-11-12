@@ -5,14 +5,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 
-from sqlalchemy import Select, func, select, true, update
+from sqlalchemy import Select, String, cast, func, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountUsageRollup, AccountUsageRollupState, ApiKey, ApiKeyUsageRollup, RequestLog
-from app.db.request_log_predicates import ACCOUNT_USAGE_EXCLUDED_KINDS, countable_account_usage_clause
+from app.db.request_log_predicates import (
+    countable_account_usage_clause,
+    countable_api_key_usage_clause,
+)
 from app.db.session import get_background_session, sqlite_writer_section
 
 logger = logging.getLogger(__name__)
@@ -52,7 +55,6 @@ FOLD_SLICE = timedelta(days=7)
 
 _STATE_ROW_ID = 1
 _EPOCH = datetime(1970, 1, 1)
-_EXCLUDED_REQUEST_KINDS = ACCOUNT_USAGE_EXCLUDED_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,28 +113,32 @@ def deduped_usage_aggregate_stmt(
 
 def api_key_usage_aggregate_stmt(
     *,
-    api_key_ids: list[str] | None = None,
     after_exclusive: datetime | None = None,
     until_inclusive: datetime | None = None,
-) -> Select[tuple[str | None, int, int | None, int, int | None, float | None]]:
+) -> Select[tuple[str, int, int | None, int, int | None, float | None]]:
     """Per-API-key usage aggregate matching the API-key summary semantics:
     no duplicate collapsing, soft-deleted rows included, warmup kinds
     excluded. Bounds are `requested_at`-based, governed by the same fold
     watermark as the account rollup."""
+    # The stored key is already a string. Grouping the equivalent expression
+    # prevents SQLite from favoring its key-order index over the timestamp
+    # range and scanning every older request just to avoid sorting the tail.
+    key_expr = cast(RequestLog.api_key_id, String)
     output_tokens_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
     conditions: list = [
-        RequestLog.api_key_id.is_not(None),
-        RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
+        countable_api_key_usage_clause(RequestLog.__table__),
     ]
-    if api_key_ids:
-        conditions.append(RequestLog.api_key_id.in_(api_key_ids))
     if after_exclusive is not None:
         conditions.append(RequestLog.requested_at > after_exclusive)
+    else:
+        # Keep an indexed timestamp range even before bootstrap. This is the
+        # entire supported datetime domain, not a truncation of lifetime data.
+        conditions.append(RequestLog.requested_at >= datetime.min)
     if until_inclusive is not None:
         conditions.append(RequestLog.requested_at <= until_inclusive)
     return (
         select(
-            RequestLog.api_key_id,
+            key_expr.label("api_key_id"),
             func.count(RequestLog.id).label("request_count"),
             func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
             func.coalesce(func.sum(output_tokens_expr), 0).label("output_tokens"),
@@ -140,7 +146,7 @@ def api_key_usage_aggregate_stmt(
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
         )
         .where(*conditions)
-        .group_by(RequestLog.api_key_id)
+        .group_by(key_expr)
     )
 
 
@@ -391,8 +397,7 @@ async def _fold_next_slice(session: AsyncSession, target: datetime) -> tuple[_Fo
         key_earliest = (
             await session.execute(
                 select(func.min(RequestLog.requested_at)).where(
-                    RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
-                    RequestLog.api_key_id.is_not(None),
+                    countable_api_key_usage_clause(RequestLog.__table__),
                 )
             )
         ).scalar_one_or_none()

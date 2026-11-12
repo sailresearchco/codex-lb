@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, raiseload, selectinload
 
 from app.core.utils.time import utcnow
+from app.db.dashboard_reads import dashboard_read_budget
 from app.db.models import (
     Account,
     AccountStatus,
@@ -41,6 +42,7 @@ from app.modules.accounts.usage_time_rollup_read import (
     read_hourly_window,
 )
 from app.modules.api_keys.limit_windows import advance_limit_reset
+from app.modules.usage.read_coverage import MAX_RAW_TAIL, require_bounded_api_key_history
 
 
 class ApiKeyOwnerDisabledError(ValueError):
@@ -265,6 +267,7 @@ class ApiKeysRepository:
 
     async def list_usage_summary_by_key(self, api_key_ids: list[str] | None = None) -> dict[str, ApiKeyUsageSummary]:
         folded, watermark = await read_api_key_rollup_state(self._session, api_key_ids)
+        await require_bounded_api_key_history(self._session, watermark, utcnow() - MAX_RAW_TAIL)
         merged: dict[str, list[float]] = {
             key_id: [
                 sums.request_count,
@@ -275,8 +278,11 @@ class ApiKeysRepository:
             ]
             for key_id, sums in folded.items()
         }
-        tail_stmt = api_key_usage_aggregate_stmt(api_key_ids=api_key_ids, after_exclusive=watermark)
+        # Scope aggregate rows after the timestamp scan; filtering key IDs in
+        # SQL makes SQLite favor the key-order index and visit folded history.
+        tail_stmt = api_key_usage_aggregate_stmt(after_exclusive=watermark)
         result = await self._session.execute(tail_stmt)
+        selected_ids = set(api_key_ids) if api_key_ids else None
         for (
             api_key_id,
             request_count,
@@ -286,6 +292,8 @@ class ApiKeysRepository:
             total_cost_usd,
         ) in result.all():
             if not api_key_id:
+                continue
+            if selected_ids is not None and api_key_id not in selected_ids:
                 continue
             totals = merged.setdefault(api_key_id, [0, 0, 0, 0, 0.0])
             totals[0] += int(request_count or 0)
@@ -309,7 +317,11 @@ class ApiKeysRepository:
 
     async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary:
         """Return aggregate usage totals for a single API key (zeroes if no logs)."""
-        summaries = await self.list_usage_summary_by_key([key_id])
+        # Self-service callers reset expired limits before this read. Budget
+        # only the aggregate, leaving those commits and key authentication
+        # outside the SQLite connection's temporary read deadline.
+        async with dashboard_read_budget(self._session):
+            summaries = await self.list_usage_summary_by_key([key_id])
         return summaries.get(
             key_id,
             ApiKeyUsageSummary(request_count=0, total_tokens=0, cached_input_tokens=0, total_cost_usd=0.0),

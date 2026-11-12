@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DashboardServiceUnavailableError
 from app.db.models import RequestLog
-from app.db.request_log_predicates import countable_account_usage_clause
+from app.db.request_log_predicates import countable_account_usage_clause, countable_api_key_usage_clause
 
 MAX_RAW_TAIL = timedelta(hours=4)
 
@@ -54,3 +54,18 @@ async def require_bounded_raw_history(
         probes.append(query.exists())
     if probes and await session.scalar(select(or_(*probes))):
         raise _building(code)
+
+
+async def require_bounded_api_key_history(
+    session: AsyncSession,
+    watermark: datetime | None,
+    cutoff: datetime,
+) -> None:
+    if watermark is not None and watermark >= cutoff:
+        return
+    times = [RequestLog.requested_at < cutoff]
+    if watermark is not None:
+        times.append(RequestLog.requested_at > watermark)
+    eligible = select(RequestLog.id).where(countable_api_key_usage_clause(RequestLog.__table__), *times)
+    if await session.scalar(select(eligible.exists())):
+        raise _building("usage_history_building")

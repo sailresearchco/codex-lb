@@ -15,3 +15,11 @@ def countable_account_usage_clause(table: FromClause) -> ColumnElement[bool]:
         table.c.account_id.is_not(None),
         table.c.request_kind.not_in([literal(kind, literal_execute=True) for kind in ACCOUNT_USAGE_EXCLUDED_KINDS]),
     )
+
+
+def countable_api_key_usage_clause(table: FromClause) -> ColumnElement[bool]:
+    # Key totals include soft-deleted and account-detached requests.
+    return and_(
+        table.c.api_key_id.is_not(None),
+        table.c.request_kind.not_in([literal(kind, literal_execute=True) for kind in ACCOUNT_USAGE_EXCLUDED_KINDS]),
+    )
