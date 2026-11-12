@@ -146,6 +146,7 @@ from app.modules.proxy._load_balancer.types import (
     ProbeReservation,
     RuntimeState,
 )
+from app.modules.proxy._load_balancer.types import NormalizedUsageInputs as _NormalizedUsageInputs
 from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
@@ -200,16 +201,6 @@ CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
 CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
 _AMBIGUOUS_CONVERSATION_OWNER_MESSAGE = "Conversation owner cannot be determined from the eligible account pool"
-
-
-@dataclass(frozen=True, slots=True)
-class _NormalizedUsageInputs:
-    primary_used: float | None
-    primary_reset: int | None
-    primary_window_minutes: int | None
-    effective_secondary_entry: _UsageWindowEntry | None
-    secondary_used: float | None
-    secondary_reset: int | None
 
 
 @dataclass
@@ -2510,6 +2501,14 @@ def _state_from_account(
         # Historical exhaustion cannot rewrite a newer upstream rejection's deadline.
         quota_secondary_used = None
 
+    # Free plans have no standard short window, but an explicit model quota
+    # can still report one. Classify that quota before plan-specific masking.
+    included_primary_used = (
+        normalized_usage.primary_used if isinstance(primary_entry, AdditionalUsageHistory) else primary_used
+    )
+    included_allowance_exhausted = any(
+        value is not None and value >= 100.0 for value in (included_primary_used, secondary_used)
+    )
     status, used_percent, reset_at = apply_usage_quota(
         status=status_seed,
         primary_used=primary_used,
@@ -2594,6 +2593,7 @@ def _state_from_account(
         inflight_streams=runtime.inflight_streams,
         leased_tokens=runtime.leased_tokens,
         routing_policy=routing_policy,
+        included_allowance_exhausted=included_allowance_exhausted,
         selection_weight_multiplier=error_rate_weight_multiplier(
             runtime, now, policy=ErrorRateWeightingPolicy(enabled=tunables.error_rate_weighting_enabled)
         ),

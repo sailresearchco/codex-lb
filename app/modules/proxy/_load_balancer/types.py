@@ -3,9 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from app.db.models import AdditionalUsageHistory, UsageHistory
+
 AccountLeaseKind = Literal["response_create", "stream"]
 
 MAX_SELECTION_ATTEMPTS = 4
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedUsageInputs:
+    primary_used: float | None
+    primary_reset: int | None
+    primary_window_minutes: int | None
+    effective_secondary_entry: UsageHistory | AdditionalUsageHistory | None
+    secondary_used: float | None
+    secondary_reset: int | None
 
 
 @dataclass

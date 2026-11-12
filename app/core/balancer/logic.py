@@ -148,6 +148,9 @@ class AccountState:
     leased_tokens: float = 0.0
     routing_policy: str = ROUTING_POLICY_NORMAL
     ignore_standard_quota: bool = False
+    # Normalized upstream usage, before local in-flight and lease pressure.
+    # Missing samples do not establish exhaustion.
+    included_allowance_exhausted: bool = False
     # Multiplier applied to this candidate's draw weight by the weighted
     # strategies (``capacity_weighted``, ``relative_availability``); ``1.0`` is
     # neutral. The balancer derives it from the account's recent upstream
@@ -465,6 +468,72 @@ def _known_expired_reauth(state: AccountState, current: float) -> bool:
     )
 
 
+def partition_account_availability(
+    states: Iterable[AccountState],
+    *,
+    now: float | None,
+    ignore_standard_quota: bool = False,
+    bypass_quota_exceeded: bool = False,
+    bypass_quota_exceeded_account_ids: Collection[str] | None = None,
+) -> tuple[list[AccountState], list[AccountState]]:
+    """Return eligible and error-backoff pools, normalizing expired blocks in place."""
+    now = time.time() if now is None else now
+    available: list[AccountState] = []
+    in_error_backoff: list[AccountState] = []
+    bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
+
+    for state in states:
+        bypass_standard_quota = (
+            ignore_standard_quota
+            or state.ignore_standard_quota
+            or bypass_quota_exceeded
+            or (bypass_account_ids is not None and state.account_id in bypass_account_ids)
+        )
+        if state.status == AccountStatus.DEACTIVATED:
+            continue
+        if state.status == AccountStatus.PAUSED:
+            continue
+        if _known_expired_reauth(state, now):
+            continue
+        if state.status == AccountStatus.RATE_LIMITED:
+            if state.reset_at and now >= state.reset_at:
+                state.status = AccountStatus.ACTIVE
+                state.used_percent = 0.0
+                state.error_count = 0
+                state.reset_at = None
+            elif not bypass_standard_quota:
+                continue
+        if state.status == AccountStatus.QUOTA_EXCEEDED:
+            if state.reset_at and now >= state.reset_at:
+                state.status = AccountStatus.ACTIVE
+                state.used_percent = 0.0
+                state.secondary_used_percent = 0.0
+                state.reset_at = None
+            elif not bypass_standard_quota:
+                continue
+        if state.cooldown_until and now >= state.cooldown_until:
+            state.cooldown_until = None
+            state.last_error_at = None
+            state.error_count = 0
+        if state.cooldown_until and now < state.cooldown_until:
+            continue
+        if state.error_count >= ERROR_BACKOFF_THRESHOLD:
+            backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))
+            if state.last_error_at and now - state.last_error_at < backoff:
+                in_error_backoff.append(state)
+                continue
+            # Error backoff expired — reset error state so recovery is
+            # not penalised by stale counts. The account has already
+            # been held back for the full backoff period; letting it
+            # re-enter the pool with a clean slate avoids the problem
+            # where a previously-high error_count causes an immediate
+            # return to maximum backoff on the very next transient error.
+            state.error_count = 0
+            state.last_error_at = None
+        available.append(state)
+    return available, in_error_backoff
+
+
 def select_account(
     states: Iterable[AccountState],
     now: float | None = None,
@@ -558,61 +627,15 @@ def select_account(
         human-readable error message when no account is eligible.
     """
     current = now or time.time()
-    available: list[AccountState] = []
-    in_error_backoff: list[AccountState] = []
     all_states = list(states)
     usage_exhaustion_state_list = list(usage_exhaustion_states) if usage_exhaustion_states is not None else all_states
-    bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
-
-    for state in all_states:
-        bypass_standard_quota = (
-            ignore_standard_quota
-            or state.ignore_standard_quota
-            or bypass_quota_exceeded
-            or (bypass_account_ids is not None and state.account_id in bypass_account_ids)
-        )
-        if state.status == AccountStatus.DEACTIVATED:
-            continue
-        if state.status == AccountStatus.PAUSED:
-            continue
-        if _known_expired_reauth(state, current):
-            continue
-        if state.status == AccountStatus.RATE_LIMITED:
-            if state.reset_at and current >= state.reset_at:
-                state.status = AccountStatus.ACTIVE
-                state.used_percent = 0.0
-                state.error_count = 0
-                state.reset_at = None
-            elif not bypass_standard_quota:
-                continue
-        if state.status == AccountStatus.QUOTA_EXCEEDED:
-            if state.reset_at and current >= state.reset_at:
-                state.status = AccountStatus.ACTIVE
-                state.used_percent = 0.0
-                state.secondary_used_percent = 0.0
-                state.reset_at = None
-            elif not bypass_standard_quota:
-                continue
-        if state.cooldown_until and current >= state.cooldown_until:
-            state.cooldown_until = None
-            state.last_error_at = None
-            state.error_count = 0
-        if state.cooldown_until and current < state.cooldown_until:
-            continue
-        if state.error_count >= ERROR_BACKOFF_THRESHOLD:
-            backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))
-            if state.last_error_at and current - state.last_error_at < backoff:
-                in_error_backoff.append(state)
-                continue
-            # Error backoff expired — reset error state so recovery is
-            # not penalised by stale counts. The account has already
-            # been held back for the full backoff period; letting it
-            # re-enter the pool with a clean slate avoids the problem
-            # where a previously-high error_count causes an immediate
-            # return to maximum backoff on the very next transient error.
-            state.error_count = 0
-            state.last_error_at = None
-        available.append(state)
+    available, in_error_backoff = partition_account_availability(
+        all_states,
+        now=current,
+        ignore_standard_quota=ignore_standard_quota,
+        bypass_quota_exceeded=bypass_quota_exceeded,
+        bypass_quota_exceeded_account_ids=bypass_quota_exceeded_account_ids,
+    )
 
     if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and available:
         opportunistic_available, reason = _filter_opportunistic_candidates(available, current)
@@ -654,7 +677,7 @@ def select_account(
                     usage_exhaustion_state_list,
                     current=current,
                     ignore_standard_quota=ignore_standard_quota or bypass_quota_exceeded,
-                    ignore_standard_quota_account_ids=bypass_account_ids,
+                    ignore_standard_quota_account_ids=bypass_quota_exceeded_account_ids,
                 )
                 if usage_exhaustion is not None:
                     return usage_exhaustion

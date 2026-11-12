@@ -217,6 +217,8 @@ async def run_unbound_selection_path(
                 def _select_from(candidates: list[AccountState]) -> SelectionResult:
                     return _select_account_preferring_budget_safe(
                         candidates,
+                        now=selection_now,
+                        prefer_included_allowance=True,
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
