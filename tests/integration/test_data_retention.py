@@ -223,14 +223,12 @@ async def test_request_log_pruning_skipped_while_fold_is_not_current(async_clien
     await run_hourly_fold_pass(now=now - timedelta(days=50))
     await run_conversation_fold_pass(now=now - timedelta(days=50))
 
-    async def _request_usage():
+    async def _assert_history_building():
         response = await async_client.get("/api/accounts")
-        assert response.status_code == 200
-        accounts = {item["accountId"]: item for item in response.json()["accounts"]}
-        return accounts["acc_stall"]["requestUsage"]
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "usage_history_building"
 
-    before = await _request_usage()
-    assert before["requestCount"] == 3
+    await _assert_history_building()
 
     await _set_retention(request_logs=30)
     deleted = await run_retention_pass(now=now)
@@ -240,7 +238,17 @@ async def test_request_log_pruning_skipped_while_fold_is_not_current(async_clien
         remaining = (await session.execute(select(RequestLog.request_id))).scalars().all()
     assert sorted(remaining) == ["req_1d", "req_40d", "req_60d"]
 
-    assert await _request_usage() == before
+    await _assert_history_building()
+    await run_fold_pass(now=now)
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    accounts = {item["accountId"]: item for item in response.json()["accounts"]}
+    assert accounts["acc_stall"]["requestUsage"] == {
+        "requestCount": 3,
+        "totalTokens": 450,
+        "cachedInputTokens": 0,
+        "totalCostUsd": pytest.approx(0.03),
+    }
 
 
 @pytest.mark.asyncio

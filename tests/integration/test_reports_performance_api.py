@@ -10,7 +10,9 @@ from fastapi import HTTPException
 from app.core.auth.dependencies import validate_dashboard_session
 from app.db.models import RequestLog
 from app.db.session import SessionLocal
+from app.modules.accounts.usage_rollup import FOLD_LAG
 from app.modules.reports.repository import ReportsRepository
+from app.modules.reports.rollup import run_report_fold_pass
 from app.modules.reports.schemas import ReportsOptionsResponse
 from app.modules.reports.service import ReportsService
 
@@ -62,6 +64,7 @@ async def test_options_are_scoped_without_full_report_or_speed_queries(async_cli
                 )
             )
         await session.commit()
+    await run_report_fold_pass(now=datetime(2026, 7, 1) + FOLD_LAG)
     response = await async_client.get(
         "/api/reports/options", params={"start_date": "2026-06-01", "end_date": "2026-06-30", "api_key_id": "key1"}
     )
