@@ -184,7 +184,7 @@ def test_local_login_enable_reopens_the_form_with_no_qualifying_check(
 def test_reset_password_prompts_revokes_and_lets_the_account_sign_in(
     recovery: _Recovery, terminal: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.modules.dashboard_auth.service import _check_password
+    from app.core.auth.passwords import _check_password
 
     recovery.add_user("rescue")
     _answer(monkeypatch, NEW_PASSWORD, NEW_PASSWORD)

@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
-import secrets
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from functools import lru_cache
 from io import BytesIO
 from time import time
 from typing import Literal, Protocol, cast
 
-import bcrypt
 import segno
 
 from app.core.audit.service import AuditActor, AuditAuthMethod, AuditService, AuditSeverity, AuditTarget
@@ -28,6 +25,8 @@ from app.core.auth.dashboard_access import (
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
+from app.core.auth.passwords import check_password, hash_password_async
+from app.core.auth.passwords import hash_password as hash_password
 from app.core.auth.providers.registry import ActiveProvider, get_auth_provider_registry
 from app.core.auth.step_up import (
     StepUpMethod,
@@ -756,7 +755,7 @@ class DashboardAuthService:
     # --- password ---
 
     async def setup_password(self, password: str) -> DashboardUser:
-        user = await self._repository.create_first_admin(hash_password(password))
+        user = await self._repository.create_first_admin(await hash_password_async(password))
         if user is None:
             raise PasswordAlreadyConfiguredError("Password is already configured")
         return user
@@ -816,7 +815,7 @@ class DashboardAuthService:
 
         user = target.user
         stored_hash = user.password_hash if user is not None else None
-        matched = _check_password(password, stored_hash if stored_hash is not None else _dummy_password_hash())
+        matched = await check_password(password, stored_hash)
         if user is None or stored_hash is None or not matched:
             username_is_valid = target.username is not None and is_valid_username(target.username)
             log_login_failed(
@@ -857,7 +856,7 @@ class DashboardAuthService:
         if current is None:
             AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"}, actor=_GUEST_ACTOR)
             return GuestVerification(password_verified=False, guest_session_generation=generation)
-        if password is None or not _check_password(password, current):
+        if password is None or not await check_password(password, current):
             log_login_failed(actor_ip, AuditAuthMethod.GUEST.value, "bad_password")
             raise InvalidCredentialsError("Invalid credentials")
         AuditService.log_async("login_success", actor_ip=actor_ip, details={"method": "guest"}, actor=_GUEST_ACTOR)
@@ -879,9 +878,9 @@ class DashboardAuthService:
 
         if user.password_hash is None:
             raise PasswordNotConfiguredError("Password is not configured")
-        if not _check_password(current_password, user.password_hash):
+        if not await check_password(current_password, user.password_hash):
             raise InvalidCredentialsError("Invalid credentials")
-        rotated = await self._repository.rotate_user_password(user.id, hash_password(new_password))
+        rotated = await self._repository.rotate_user_password(user.id, await hash_password_async(new_password))
         AuditService.log_async(
             "password_changed",
             actor_ip=actor_ip,
@@ -915,7 +914,7 @@ class DashboardAuthService:
 
         if user.password_hash is None:
             raise PasswordNotConfiguredError("Password is not configured")
-        if not _check_password(password, user.password_hash):
+        if not await check_password(password, user.password_hash):
             raise InvalidCredentialsError("Invalid credentials")
         # Serialised with account mutations and invite acceptance: a pending
         # invite would otherwise turn a passwordless install into one where
@@ -963,7 +962,7 @@ class DashboardAuthService:
         return generation
 
     async def set_guest_password(self, password: str) -> None:
-        await self._repository.set_guest_password_hash(hash_password(password))
+        await self._repository.set_guest_password_hash(await hash_password_async(password))
 
     async def clear_guest_password(self) -> None:
         await self._repository.clear_guest_password_hash()
@@ -1222,7 +1221,7 @@ class DashboardAuthService:
         username = user.username
         actor, target = _user_actor(user, auth_method or AUTH_METHOD_PASSWORD), _user_target(user)
         if "password" in methods and (
-            user.password_hash is None or not _check_password(password or "", user.password_hash)
+            user.password_hash is None or not await check_password(password or "", user.password_hash)
         ):
             log_login_failed(actor_ip, "step_up", "bad_password", username=username)
             raise InvalidCredentialsError("Invalid credentials")
@@ -1282,8 +1281,8 @@ _password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, 
 #: they name. The per-(address, username) bucket above keeps one account's
 #: failures from barring another, which also means one address can mint a fresh
 #: bucket per username it invents; without a coarse address bucket the endpoint
-#: has no ceiling at all and every attempt costs a blocking password-hash
-#: comparison on the event loop that serves the proxy.
+#: has no per-address ceiling at all. Each admitted attempt costs a bcrypt
+#: comparison in the bounded password worker.
 #:
 #: 60/60 s is seven and a half times the per-account allowance: a NATed office
 #: whose people are all mistyping at once never reaches it (one sign-in form
@@ -1364,21 +1363,3 @@ def _qr_svg_data_uri(payload: str) -> str:
     qr.save(buffer, kind="svg", xmldecl=False, scale=6, border=2)
     raw = buffer.getvalue()
     return f"data:image/svg+xml;base64,{base64.b64encode(raw).decode('ascii')}"
-
-
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-
-
-@lru_cache(maxsize=1)
-def _dummy_password_hash() -> str:
-    """A throwaway hash verified against when no real one exists (built on first use, not at import)."""
-
-    return hash_password(secrets.token_urlsafe(32))
-
-
-def _check_password(password: str, password_hash: str) -> bool:
-    try:
-        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
-    except ValueError:
-        return False

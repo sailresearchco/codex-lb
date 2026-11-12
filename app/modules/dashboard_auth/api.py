@@ -35,6 +35,7 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.auth.external_identity import ExternalResolution, resolve_trusted_header_request
+from app.core.auth.passwords import hash_password_async
 from app.core.auth.providers.registry import get_auth_provider_registry
 from app.core.auth.step_up import STEP_UP_COOKIE, STEP_UP_UNAVAILABLE_MESSAGE, step_up_expires_at
 from app.core.bootstrap import (
@@ -117,7 +118,6 @@ from app.modules.dashboard_auth.service import (
     get_password_rate_limiter,
     get_step_up_cookie_store,
     get_totp_rate_limiter,
-    hash_password,
     is_local_password_session,
     log_login_failed,
     session_clock,
@@ -1026,7 +1026,7 @@ async def accept_invite(
             user = await users.service.accept_invite(
                 payload.token,
                 username=payload.username,
-                password_hash=hash_password(password),
+                password_hash=await hash_password_async(password),
                 display_name=payload.display_name,
                 actor_ip=_client_host(request),
             )

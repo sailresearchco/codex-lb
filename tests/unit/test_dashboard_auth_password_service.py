@@ -406,7 +406,7 @@ async def test_login_target_resolution_single_and_multi_user() -> None:
 async def test_failed_logins_always_cost_exactly_one_password_check(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
     """No early return before bcrypt: unknown, inactive and password-less accounts take the same path."""
 
-    import app.modules.dashboard_auth.service as service_module
+    import app.core.auth.passwords as password_module
 
     repository = _FakeRepository()
     service = _service(repository)
@@ -423,13 +423,13 @@ async def test_failed_logins_always_cost_exactly_one_password_check(monkeypatch:
         checks.append(password_hash)
         return False
 
-    monkeypatch.setattr(service_module, "_check_password", counting_check)
+    monkeypatch.setattr(password_module, "_check_password", counting_check)
     target = await service.resolve_login_target(username)
     with pytest.raises(InvalidCredentialsError):
         await service.verify_user_password(target, "password123")
 
     assert len(checks) == 1
-    assert checks[0] == service_module._dummy_password_hash()
+    assert checks[0] == password_module._dummy_password_hash()
 
 
 @pytest.mark.asyncio
