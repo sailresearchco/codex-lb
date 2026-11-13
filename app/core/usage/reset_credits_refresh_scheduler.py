@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import math
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from app.core.clients.rate_limit_reset_credits import (
 from app.core.config.background_jobs import background_job_enabled, resolve_background_job_toggle
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.usage import is_weekly_window_minutes
 from app.db.models import Account, AccountStatus
 from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.auth_manager import AuthManager
@@ -48,6 +50,8 @@ ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 _TICK_JITTER_LOW = 0.9
 _TICK_JITTER_HIGH = 1.1
 _AUTO_REDEEM_WINDOW_SECONDS = 5 * 60
+_EARLY_REDEEM_MIN_USED_PERCENT = 99.0
+_EARLY_REDEEM_MIN_RESET_SECONDS = 72 * 60 * 60
 # Polling cadence per replica (fixed; issue #1340 / PRINCIPLES.md P2). The
 # dataclass field stays so tests can inject a shorter interval.
 _REFRESH_INTERVAL_SECONDS = 60
@@ -270,19 +274,26 @@ async def _refresh_account_reset_credits(
             account.id,
         )
         return
-    if auto_redeem_before_expiry and _should_auto_redeem_snapshot(
-        snapshot,
-        window_seconds=auto_redeem_window_seconds,
-    ):
+    if auto_redeem_before_expiry:
         try:
+            now = datetime.now(UTC)
+            target_credit = _select_auto_redeem_target_credit(snapshot, now=now)
+            if target_credit is None:
+                return
+            early_redemption = not _should_rescue_expiring_credit(
+                target_credit, now=now, window_seconds=auto_redeem_window_seconds
+            )
+            if early_redemption and not await _has_early_reset_candidate(account):
+                return
             await _auto_redeem_reset_credit(
                 account,
-                snapshot=snapshot,
+                target_credit=target_credit,
                 encryptor=encryptor,
                 store=store,
                 fetch_fn=fetch_fn,
                 redeem_fn=redeem_fn,
                 resolve_route=auto_redeem_resolve_route or resolve_route,
+                early_redemption=early_redemption,
             )
         except Exception:
             logger.warning(
@@ -292,39 +303,44 @@ async def _refresh_account_reset_credits(
             )
 
 
-def _should_auto_redeem_snapshot(
-    snapshot: RateLimitResetCreditsSnapshot,
+def _should_rescue_expiring_credit(
+    credit: ResetCreditItem,
     *,
+    now: datetime,
     window_seconds: float | None,
 ) -> bool:
-    if snapshot.available_count <= 0 or snapshot.nearest_expires_at is None:
+    if credit.expires_at is None:
         return False
-    expires_at = snapshot.nearest_expires_at
+    expires_at = credit.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
-    seconds_until_expiry = (expires_at - datetime.now(UTC)).total_seconds()
+    seconds_until_expiry = (expires_at - now).total_seconds()
     return 0 <= seconds_until_expiry <= float(window_seconds or 0)
 
 
 async def _auto_redeem_reset_credit(
     account: Account,
     *,
-    snapshot: RateLimitResetCreditsSnapshot,
+    target_credit: ResetCreditItem,
     encryptor: TokenEncryptor,
     store: RateLimitResetCreditsStore,
     fetch_fn: ResetCreditsFetchFn,
     redeem_fn: ResetCreditsRedeemFn | None,
     resolve_route: ResolveRouteFn | None,
+    early_redemption: bool = False,
 ) -> None:
+    from app.core.exceptions import DashboardConflictError
     from app.modules.rate_limit_reset_credits.api import (
         ResetCreditRedeemRequestAlreadyPinned,
         _redeem_soonest_reset_credit,
     )
     from app.modules.rate_limit_reset_credits.redeem_coordination import get_pinned_redeem_credit_id
 
-    redeem_request_id = _auto_redeem_request_id(account, snapshot)
-    if redeem_request_id is None:
+    expiry_request_id = _auto_redeem_request_id(account, target_credit)
+    if expiry_request_id is None:
         return
+    coupon_request_id = _early_redeem_request_id(account.id, target_credit.id)
+    redeem_request_id = coupon_request_id if early_redemption else expiry_request_id
     pinned_credit_id = await get_pinned_redeem_credit_id(account.id, redeem_request_id)
     if pinned_credit_id is not None:
         logger.info(
@@ -334,9 +350,18 @@ async def _auto_redeem_reset_credit(
             pinned_credit_id,
         )
         return
-    target_credit = _select_auto_redeem_target_credit(snapshot)
-    if target_credit is None:
-        return
+
+    async def prepare_account(candidate: Account) -> Account:
+        # The expiry path must honor an earlier ambiguous consume of this
+        # coupon, even after its separate 24-hour expiry-date guard lapses.
+        pinned = await get_pinned_redeem_credit_id(candidate.id, coupon_request_id)
+        if pinned is not None:
+            raise ResetCreditRedeemRequestAlreadyPinned(
+                account_id=candidate.id, redeem_request_id=coupon_request_id, credit_id=pinned
+            )
+        if early_redemption:
+            return await _prepare_early_reset_account(candidate)
+        return candidate
 
     effective_redeem_fn = redeem_fn or _redeem_soonest_reset_credit
     async with get_background_session() as lock_session:
@@ -369,7 +394,14 @@ async def _auto_redeem_reset_credit(
                 skip_if_redeem_request_pinned=True,
                 expected_credit_id=target_credit.id,
                 expected_credit_expires_at=target_credit.expires_at,
+                prepare_account=prepare_account,
+                redeem_request_expires_at=target_credit.expires_at if early_redemption else None,
+                additional_redeem_request_id=expiry_request_id if early_redemption else None,
             )
+        except DashboardConflictError as exc:
+            if exc.code != "early_reset_not_applicable":
+                raise
+            logger.info("Skipping early reset credit redeem after fresh usage check account_id=%s", account.id)
         except ResetCreditRedeemRequestAlreadyPinned as exc:
             logger.info(
                 "Skipping automatic reset credit redeem because an automatic redeem was pinned "
@@ -379,30 +411,108 @@ async def _auto_redeem_reset_credit(
             )
 
 
-def _auto_redeem_request_id(account: Account, snapshot: RateLimitResetCreditsSnapshot) -> str | None:
-    expires_at = snapshot.nearest_expires_at
+def _auto_redeem_request_id(account: Account, credit: ResetCreditItem) -> str | None:
+    expires_at = credit.expires_at
     if expires_at is None:
         return None
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
     else:
         expires_at = expires_at.astimezone(UTC)
-    # Intentionally one automatic request per account and UTC expiry date. If
-    # multiple credits expire on the same day, the automatic path favors not
+    # Intentionally one expiry rescue per account and UTC expiry date. If
+    # multiple credits expire on the same day, this fallback favors not
     # burning a second coupon over trying to exhaust every expiring credit.
     digest = hashlib.sha256(f"{account.id}:{expires_at.date().isoformat()}".encode("utf-8")).hexdigest()[:32]
     return f"auto-reset-credit:{digest}"
 
 
-def _select_auto_redeem_target_credit(snapshot: RateLimitResetCreditsSnapshot) -> ResetCreditItem | None:
+def _select_auto_redeem_target_credit(
+    snapshot: RateLimitResetCreditsSnapshot, *, now: datetime
+) -> ResetCreditItem | None:
     if snapshot.available_count <= 0:
         return None
     available = [
-        credit for credit in snapshot.credits if credit.status == "available" and credit.expires_at is not None
+        credit
+        for credit in snapshot.credits
+        if credit.status == "available"
+        and credit.expires_at is not None
+        and credit.expires_at.replace(tzinfo=credit.expires_at.tzinfo or UTC) >= now
     ]
     if not available:
         return None
     return min(available, key=lambda credit: credit.expires_at)
+
+
+def _early_redeem_request_id(account_id: str, credit_id: str) -> str:
+    digest = hashlib.sha256(f"{account_id}:{credit_id}".encode()).hexdigest()[:32]
+    return f"auto-early-reset-credit:{digest}"
+
+
+def _early_weekly_reset_qualifies(
+    *, used_percent: float, reset_at: int | None, window_minutes: int | None, now: datetime
+) -> bool:
+    return (
+        is_weekly_window_minutes(window_minutes)
+        and math.isfinite(used_percent)
+        and used_percent >= _EARLY_REDEEM_MIN_USED_PERCENT
+        and reset_at is not None
+        and reset_at - now.timestamp() >= _EARLY_REDEEM_MIN_RESET_SECONDS
+    )
+
+
+async def _has_early_reset_candidate(account: Account) -> bool:
+    # This inexpensive stored sample is only a prefilter. It never authorizes
+    # consumption; the serialized forced fetch below is authoritative.
+    async with get_background_session() as session:
+        usage_repo = UsageRepository(session)
+        secondary = await usage_repo.latest_entry_for_account(account.id, window="secondary")
+        primary = await usage_repo.latest_entry_for_account(account.id, window="primary")
+        weekly = [
+            row for row in (secondary, primary) if row is not None and is_weekly_window_minutes(row.window_minutes)
+        ]
+        if not weekly:
+            return False
+        latest = max(weekly, key=lambda row: row.recorded_at)
+        return _early_weekly_reset_qualifies(
+            used_percent=latest.used_percent,
+            reset_at=latest.reset_at,
+            window_minutes=latest.window_minutes,
+            now=datetime.now(UTC),
+        )
+
+
+async def _prepare_early_reset_account(account: Account) -> Account:
+    from app.core.exceptions import DashboardConflictError
+
+    async with get_background_session() as session:
+        accounts_repo = AccountsRepository(session)
+        current = await accounts_repo.get_by_id(account.id)
+        if current is None or current.status in _RESET_CREDITS_SKIP_STATUSES or not current.chatgpt_account_id:
+            raise DashboardConflictError("Account is not eligible for early reset", code="early_reset_not_applicable")
+        result = await UsageUpdater(
+            UsageRepository(session),
+            accounts_repo,
+            AdditionalUsageRepository(session),
+            auth_manager=AuthManager(accounts_repo),
+        ).force_refresh_result(current)
+        weekly = result.weekly_window
+        if (
+            not result.fetch_succeeded
+            or weekly is None
+            or current.status in _RESET_CREDITS_SKIP_STATUSES
+            or not current.chatgpt_account_id
+            or not _early_weekly_reset_qualifies(
+                used_percent=weekly.used_percent,
+                reset_at=weekly.reset_at,
+                window_minutes=weekly.window_minutes,
+                now=datetime.now(UTC),
+            )
+        ):
+            raise DashboardConflictError(
+                "Fresh weekly usage does not qualify for early reset", code="early_reset_not_applicable"
+            )
+        detach_session_objects(session)
+        return current
 
 
 async def _refresh_usage_after_auto_redeem(account: Account) -> None:

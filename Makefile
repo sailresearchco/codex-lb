@@ -44,6 +44,12 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_earliest_activity.py \
 	tests/integration/test_self_usage_read_budget.py \
 	tests/integration/test_api_key_countable_index_migration.py \
+	tests/integration/test_reset_attempt_retention_migration.py \
+	tests/integration/test_conservative_reset_redemption.py \
+	tests/integration/test_reset_credits_replica_safety.py::test_explicit_redeem_retention_survives_default_ttl_and_expires \
+	tests/integration/test_reset_credits_replica_safety.py::test_expiry_guard_extension_keeps_first_coupon_and_never_shortens \
+	tests/integration/test_reset_credits_replica_safety.py::test_explicit_redeem_retention_normalizes_non_utc_deadline \
+	tests/integration/test_reset_credits_replica_safety.py::test_pin_redeem_request_reused_after_ttl_repins_new_credit \
 	tests/integration/test_account_rollup_rekey.py \
 	tests/integration/test_account_deletion_background.py \
 	tests/integration/test_request_usage_time_rollup.py \

@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import Field
@@ -75,6 +75,7 @@ router = APIRouter(
 FetchFn = Callable[..., Awaitable[ResetCreditsResponse]]
 ConsumeFn = Callable[..., Awaitable[ConsumeResetCreditResponse]]
 RefreshUsageFn = Callable[[Account], Awaitable[None]]
+PrepareRedeemAccountFn = Callable[[Account], Awaitable[Account]]
 ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 
 _NON_REDEEMABLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
@@ -223,6 +224,9 @@ async def _redeem_soonest_reset_credit(
     skip_if_redeem_request_pinned: bool = False,
     expected_credit_id: str | None = None,
     expected_credit_expires_at: datetime | None = None,
+    prepare_account: PrepareRedeemAccountFn | None = None,
+    redeem_request_expires_at: datetime | None = None,
+    additional_redeem_request_id: str | None = None,
 ) -> _RedeemResetCreditOutcome:
     _assert_account_can_redeem_reset_credit(account)
     effective_fetch_fn = fetch_fn or fetch_reset_credits
@@ -243,6 +247,9 @@ async def _redeem_soonest_reset_credit(
                 skip_if_redeem_request_pinned=skip_if_redeem_request_pinned,
                 expected_credit_id=expected_credit_id,
                 expected_credit_expires_at=expected_credit_expires_at,
+                prepare_account=prepare_account,
+                redeem_request_expires_at=redeem_request_expires_at,
+                additional_redeem_request_id=additional_redeem_request_id,
             )
     except RedeemClaimTimeoutError as exc:
         raise DashboardConflictError(
@@ -324,10 +331,16 @@ async def _redeem_soonest_reset_credit_locked(
     skip_if_redeem_request_pinned: bool,
     expected_credit_id: str | None,
     expected_credit_expires_at: datetime | None,
+    prepare_account: PrepareRedeemAccountFn | None,
+    redeem_request_expires_at: datetime | None,
+    additional_redeem_request_id: str | None,
 ) -> _RedeemResetCreditOutcome:
-    redeem_account = account
+    # Automatic policy checks execute under the same serializer as manual
+    # consumption and before resolving credentials for the consume request.
+    redeem_account = await prepare_account(account) if prepare_account is not None else account
+    _assert_account_can_redeem_reset_credit(redeem_account)
     if auth_manager is not None:
-        redeem_account = await auth_manager.ensure_fresh(account, force=False)
+        redeem_account = await auth_manager.ensure_fresh(redeem_account, force=False)
 
     # Every accepted consume MUST participate in the durable ledger. When the
     # caller supplies no redeem_request_id (the still-supported no-body dashboard
@@ -394,7 +407,22 @@ async def _redeem_soonest_reset_credit_locked(
         # Pin the selected credit before the consume: a synthesized or
         # client-supplied id is now always recorded, so a lost consume response
         # leaves a durable pin any replica can reuse.
-        credit_id = await pin_redeem_request(account.id, redeem_request_id, credit.id)
+        if additional_redeem_request_id is not None:
+            # Record the expiry fallback guard before an early consume, even
+            # if that consume subsequently returns an ambiguous failure.
+            await pin_redeem_request(
+                account.id,
+                additional_redeem_request_id,
+                credit.id,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+                extend_expiry=True,
+            )
+        if redeem_request_expires_at is None:
+            credit_id = await pin_redeem_request(account.id, redeem_request_id, credit.id)
+        else:
+            credit_id = await pin_redeem_request(
+                account.id, redeem_request_id, credit.id, expires_at=redeem_request_expires_at
+            )
 
     try:
         result = await effective_consume_fn(
