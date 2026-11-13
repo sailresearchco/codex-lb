@@ -524,9 +524,10 @@ legacy owner, the request MUST fail closed without creating or rewriting any
 of those rows.
 
 A missing thread row MAY use an eligible process-session soft row as its
-initial placement preference. If that process row is missing, the first
-admitted thread MUST initialize it with insert-if-absent and MUST persist its
-own bounded thread row. A concurrent or later thread MUST NOT overwrite that
+initial placement preference, except for qualifying independent Codex children
+whose Responses affinity omits that seed. If a request uses process preference
+and that process row is missing, the first admitted thread MUST initialize it
+with insert-if-absent and MUST persist its own bounded thread row. A concurrent or later thread MUST NOT overwrite that
 first-writer process preference. Account-cap spillover or later thread movement
 MUST NOT rewrite or delete the process-session mapping or a sibling's thread
 mapping. A provisional recovery-probe reservation MUST NOT initialize a
@@ -1607,7 +1608,7 @@ When a pre-visible upstream failure on the HTTP stream transport is a code-less 
 
 ### Requirement: Included allowance preference preserves established affinity
 
-Included-allowance preference SHALL apply when choosing a new account without overriding an established soft-affinity owner or initial session preference. Included-allowance exhaustion alone SHALL NOT add a new affinity-reallocation trigger, owner admission error, or transport-reuse check. Existing budget, health, overload, and continuity rules SHALL continue to govern established affinity. Hard ownership for files, response state, and Codex continuity SHALL remain account-bound.
+Included-allowance preference SHALL apply when choosing a new account without overriding an established soft-affinity owner or retained initial session preference. Qualifying independent Codex children SHALL omit the process preference before selection as defined by the Responses compatibility contract. Included-allowance exhaustion alone SHALL NOT add a new affinity-reallocation trigger, owner admission error, or transport-reuse check. Existing budget, health, overload, and continuity rules SHALL continue to govern established affinity. Hard ownership for files, response state, and Codex continuity SHALL remain account-bound.
 
 #### Scenario: Exhausted sticky owner retains established affinity
 - **GIVEN** a soft sticky owner has exhausted included allowance and extra credits
