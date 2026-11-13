@@ -22,7 +22,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -190,11 +190,9 @@ async def release_redeem_claim(account_id: str, holder_id: str) -> None:
 async def get_pinned_redeem_credit_id(account_id: str, redeem_request_id: str) -> str | None:
     """Read the credit pinned to this redeem_request_id by any replica.
 
-    Rows older than the 24h TTL are ignored (the read TTL matches the purge
-    TTL applied by ``pin_redeem_request``), so an expired pin reads as absent.
-    The caller then re-selects a fresh credit and re-pins it via
-    ``pin_redeem_request`` instead of forwarding the redemption for a stale
-    credit id that the purge path would otherwise drop.
+    Explicit deadlines retain automatic coupon attempts through expiry.
+    Existing/manual rows without a deadline keep their 24-hour TTL. Read and
+    purge use the same expiration rule.
     """
     now = datetime.now(UTC)
     session = SessionLocal()
@@ -203,23 +201,39 @@ async def get_pinned_redeem_credit_id(account_id: str, redeem_request_id: str) -
             select(ResetCreditRedeemRequest.credit_id).where(
                 ResetCreditRedeemRequest.account_id == account_id,
                 ResetCreditRedeemRequest.redeem_request_id == redeem_request_id,
-                ResetCreditRedeemRequest.created_at >= now - REDEEM_REQUEST_TTL,
+                or_(
+                    ResetCreditRedeemRequest.expires_at >= now,
+                    and_(
+                        ResetCreditRedeemRequest.expires_at.is_(None),
+                        ResetCreditRedeemRequest.created_at >= now - REDEEM_REQUEST_TTL,
+                    ),
+                ),
             )
         )
     finally:
         await close_session(session)
 
 
-async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id: str) -> str:
+async def pin_redeem_request(
+    account_id: str,
+    redeem_request_id: str,
+    credit_id: str,
+    *,
+    expires_at: datetime | None = None,
+    extend_expiry: bool = False,
+) -> str:
     """Durably pin the selected credit to this redeem request; first writer wins.
 
     Returns the authoritative credit id (the previously pinned one on
-    conflict). Rows older than the 24h TTL for this account are purged in the
-    same transaction BEFORE the insert, so a ``redeem_request_id`` reused after
-    its prior row has aged past the TTL is re-pinned to the new credit instead
-    of colliding with the stale row via ``ON CONFLICT DO NOTHING`` and losing
-    the new pin.
+    conflict). Expired rows are purged BEFORE the insert using their explicit
+    deadline or the default 24-hour TTL, so stale rows cannot absorb a new
+    insert. ``extend_expiry`` can prolong a shared fallback guard while
+    preserving its first-writer credit identity.
     """
+    if extend_expiry and expires_at is None:
+        raise ValueError("Extending a redeem pin requires an explicit expiry")
+    if expires_at is not None:
+        expires_at = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at.astimezone(UTC)
     now = datetime.now(UTC)
     session = SessionLocal()
     try:
@@ -228,6 +242,7 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
             "redeem_request_id": redeem_request_id,
             "credit_id": credit_id,
             "created_at": now,
+            "expires_at": expires_at,
         }
         # Purge expired rows first: an expired row for the SAME
         # (account_id, redeem_request_id) would otherwise absorb the insert
@@ -236,7 +251,13 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
         await session.execute(
             delete(ResetCreditRedeemRequest).where(
                 ResetCreditRedeemRequest.account_id == account_id,
-                ResetCreditRedeemRequest.created_at < now - REDEEM_REQUEST_TTL,
+                or_(
+                    ResetCreditRedeemRequest.expires_at < now,
+                    and_(
+                        ResetCreditRedeemRequest.expires_at.is_(None),
+                        ResetCreditRedeemRequest.created_at < now - REDEEM_REQUEST_TTL,
+                    ),
+                ),
             )
         )
         dialect = session.get_bind().dialect.name
@@ -261,6 +282,19 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
                         ResetCreditRedeemRequest.redeem_request_id,
                     ]
                 )
+            )
+        if extend_expiry:
+            await session.execute(
+                update(ResetCreditRedeemRequest)
+                .where(
+                    ResetCreditRedeemRequest.account_id == account_id,
+                    ResetCreditRedeemRequest.redeem_request_id == redeem_request_id,
+                    or_(
+                        ResetCreditRedeemRequest.expires_at.is_(None),
+                        ResetCreditRedeemRequest.expires_at < expires_at,
+                    ),
+                )
+                .values(expires_at=expires_at)
             )
         await session.commit()
         stored = await session.scalar(

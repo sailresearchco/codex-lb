@@ -627,6 +627,76 @@ async def test_get_pinned_redeem_credit_id_ignores_expired_rows(async_client) ->
 
 
 @pytest.mark.asyncio
+async def test_explicit_redeem_retention_survives_default_ttl_and_expires(async_client) -> None:
+    account_id = await _import_account(async_client, email="retained@example.com", account_id="acc_retained")
+    now = datetime.now(UTC)
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                ResetCreditRedeemRequest(
+                    account_id=account_id,
+                    redeem_request_id="automatic",
+                    credit_id="retained-coupon",
+                    created_at=now - timedelta(days=3),
+                    expires_at=now + timedelta(days=10),
+                ),
+                ResetCreditRedeemRequest(
+                    account_id=account_id,
+                    redeem_request_id="expired-automatic",
+                    credit_id="expired-coupon",
+                    created_at=now - timedelta(hours=1),
+                    expires_at=now - timedelta(seconds=1),
+                ),
+            ]
+        )
+        await session.commit()
+    assert await get_pinned_redeem_credit_id(account_id, "automatic") == "retained-coupon"
+    assert await get_pinned_redeem_credit_id(account_id, "expired-automatic") is None
+    await pin_redeem_request(account_id, "manual", "manual-coupon")
+    assert await get_pinned_redeem_credit_id(account_id, "automatic") == "retained-coupon"
+    async with SessionLocal() as session:
+        assert await session.get(ResetCreditRedeemRequest, (account_id, "expired-automatic")) is None
+
+
+@pytest.mark.asyncio
+async def test_expiry_guard_extension_keeps_first_coupon_and_never_shortens(async_client) -> None:
+    account_id = await _import_account(async_client, email="guard@example.com", account_id="acc_guard")
+    now = datetime.now(UTC)
+    await pin_redeem_request(account_id, "fallback-guard", "first", expires_at=now + timedelta(minutes=1))
+    assert (
+        await pin_redeem_request(
+            account_id, "fallback-guard", "second", expires_at=now + timedelta(days=1), extend_expiry=True
+        )
+        == "first"
+    )
+    await pin_redeem_request(
+        account_id, "fallback-guard", "third", expires_at=now + timedelta(hours=1), extend_expiry=True
+    )
+    async with SessionLocal() as session:
+        row = await session.get(ResetCreditRedeemRequest, (account_id, "fallback-guard"))
+        assert row is not None
+        assert row.credit_id == "first"
+        assert row.expires_at is not None
+        assert row.expires_at.replace(tzinfo=UTC) == now + timedelta(days=1)
+
+
+@pytest.mark.asyncio
+async def test_explicit_redeem_retention_normalizes_non_utc_deadline(async_client) -> None:
+    from datetime import timezone
+
+    account_id = await _import_account(async_client, email="offset@example.com", account_id="acc_offset")
+    utc_deadline = datetime.now(UTC) + timedelta(hours=1)
+    upstream_deadline = utc_deadline.astimezone(timezone(timedelta(hours=-8)))
+    await pin_redeem_request(account_id, "offset-pin", "coupon", expires_at=upstream_deadline)
+    assert await get_pinned_redeem_credit_id(account_id, "offset-pin") == "coupon"
+    async with SessionLocal() as session:
+        row = await session.get(ResetCreditRedeemRequest, (account_id, "offset-pin"))
+        assert row is not None
+        assert row.expires_at is not None
+        assert row.expires_at.replace(tzinfo=UTC) == utc_deadline
+
+
+@pytest.mark.asyncio
 async def test_v1_redeem_on_fresh_replica_falls_back_to_upstream_and_succeeds(async_client, monkeypatch) -> None:
     """A freshly started replica with an empty snapshot store must not 409 a
     redeem_id that upstream reports as available."""

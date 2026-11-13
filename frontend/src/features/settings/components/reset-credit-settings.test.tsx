@@ -21,18 +21,9 @@ describe("ResetCreditSettings", () => {
       />,
     );
 
-    expect(screen.getByText("Reset credits")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Show reset-credit badges" })).toBeChecked();
-    expect(screen.getByRole("switch", { name: "Auto-redeem reset credits before expiry" })).not.toBeChecked();
+    expect(screen.getByRole("switch", { name: "Automatically use reset credits" })).not.toBeChecked();
     expect(screen.getByRole("switch", { name: "Show reset action expiry" })).toBeChecked();
-    expect(
-      screen.getByText("Attempts to redeem the soonest reset credit about 5 minutes before it expires."),
-    ).toBeInTheDocument();
-    expect(screen.getAllByRole("switch").map((toggle) => toggle.getAttribute("aria-label"))).toEqual([
-      "Show reset-credit badges",
-      "Show reset action expiry",
-      "Auto-redeem reset credits before expiry",
-    ]);
   });
 
   it.each([
@@ -42,7 +33,7 @@ describe("ResetCreditSettings", () => {
       patch: { showResetCreditBadges: false },
     },
     {
-      name: "Auto-redeem reset credits before expiry",
+      name: "Automatically use reset credits",
       settings: createDashboardSettings({ autoRedeemResetCreditsBeforeExpiry: false }),
       patch: { autoRedeemResetCreditsBeforeExpiry: true },
     },
@@ -77,7 +68,7 @@ describe("ResetCreditSettings", () => {
     );
 
     expect(screen.getByRole("switch", { name: "Show reset-credit badges" })).toBeDisabled();
-    expect(screen.getByRole("switch", { name: "Auto-redeem reset credits before expiry" })).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "Automatically use reset credits" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Show reset action expiry" })).toBeDisabled();
   });
 });

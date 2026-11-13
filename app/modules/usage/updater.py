@@ -135,6 +135,8 @@ class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
 class AccountRefreshResult:
     usage_written: bool
     fetch_succeeded: bool = True
+    # Only a measurement returned by this fetch; never a retained history row.
+    weekly_window: UsageWindowWrite | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -793,7 +795,15 @@ class UsageUpdater:
         )
         usage_written = any(_usage_entry_written(entry) for entry in entries)
         await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
-        return AccountRefreshResult(usage_written=usage_written)
+        weekly_window = next(
+            (
+                window
+                for window in reversed(snapshot_windows)
+                if usage_core.is_weekly_window_minutes(window.window_minutes)
+            ),
+            None,
+        )
+        return AccountRefreshResult(usage_written=usage_written, weekly_window=weekly_window)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:

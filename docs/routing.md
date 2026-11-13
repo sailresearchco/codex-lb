@@ -55,6 +55,14 @@ When enabled and several accounts are otherwise eligible, selection is restricte
 
 For fresh foreground assignments, the selector first prefers eligible accounts whose applicable included allowance is not exhausted, then applies the configured strategy and reset preference. Existing conversation affinity and account-owned continuation state retain their current behavior, so an established conversation may continue using its owner's extra credits. Recovery probes and opportunistic burn policies retain their existing rules. If no eligible account has included allowance, existing credit fallback remains available. This preference does not redeem resets or purchase credits.
 
+### Automatic banked resets
+
+With **Automatically use reset credits** and reset-credit polling enabled, the scheduler attempts to use one earliest-expiring banked reset when freshly checked weekly allowance is at most 1% remaining and its next scheduled weekly refresh is at least 72 hours away. It rechecks usage while serializing redemption with manual and other automatic attempts. Five-hour-only or model-specific exhaustion does not trigger this weekly rule.
+
+The existing attempt about five minutes before coupon expiry remains a fallback. A banked reset can move the next scheduled refresh; multiple resets do not accumulate allowance above 100%. Early automatic attempts remain recorded through the coupon's expiry so an uncertain response is not blindly retried. Another early reset requires renewed depletion. Each early attempt also suppresses the expiry fallback for 24 hours for coupons on that account sharing the same UTC expiry date. These rules cannot guarantee that every coupon is usable before it expires.
+
+Owning contract: [rate-limit-reset-credits](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/rate-limit-reset-credits).
+
 ### Relative latency weighting
 
 The `Capacity weighted` and `Relative availability` strategies also discount accounts that are slower than their siblings, down to half of their normal weight, using two replica-local signals measured from the last hour of successful, unqueued, single-attempt turns:

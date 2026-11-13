@@ -835,7 +835,8 @@ class ResetCreditRedeemRequest(Base):
     Written inside the per-account serialized redeem section BEFORE the
     upstream consume call so a retry carrying the same redeem_request_id —
     served by ANY replica — resolves to the originally selected credit and
-    never burns a second one. Rows are purged opportunistically after 24h.
+    never burns a second one. Manual rows expire after 24h; automatic coupon
+    attempts can retain their pin through an explicit coupon deadline.
     """
 
     __tablename__ = "reset_credit_redeem_requests"
@@ -848,6 +849,7 @@ class ResetCreditRedeemRequest(Base):
     redeem_request_id: Mapped[str] = mapped_column(String, primary_key=True)
     credit_id: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ResetCreditRedeemClaim(Base):
