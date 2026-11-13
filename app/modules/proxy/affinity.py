@@ -81,8 +81,9 @@ class _AffinityPolicy:
     # is session_header even on a thread-scoped request; a thread-only raw
     # key stays thread_header so a session_header tombstone cannot hide it.
     legacy_continuity_source: _CodexSessionSource | None = None
-    # A previously unseen thread should inherit the healthy process preference
-    # once, then persist its own bounded row. This is never ownership: a
+    # A previously unseen thread normally inherits the process preference once,
+    # then persists its own bounded row. Proven independent children omit this
+    # seed and use ordinary first-account selection. This is never ownership: a
     # missing process default may be initialized once by insert-if-absent, but
     # no thread request may update or delete an established process row.
     seed_selection_key: str | None = None
@@ -515,6 +516,10 @@ def _request_allows_unavailable_legacy_owner_abandonment(payload: ResponsesReque
     # into a marker-only or missing-previous-response shortcut.
     if not responses_request_contains_goal_continuation_context(payload):
         return False
+    return _request_is_account_neutral(payload)
+
+
+def _request_is_account_neutral(payload: ResponsesRequest) -> bool:
     # Classify the same canonical body that subscription egress would send.
     # Raw model dumps retain accepted compatibility-only controls, which are
     # not account state and must not make equivalent request forms disagree.
@@ -525,6 +530,32 @@ def _request_allows_unavailable_legacy_owner_abandonment(payload: ResponsesReque
     if replay_payload.get("type") == "response.create":
         replay_payload.pop("type")
     return responses_payload_is_account_neutral_fresh_replay(replay_payload)
+
+
+def _request_allows_independent_child_placement(payload: ResponsesRequest, headers: Mapping[str, str]) -> bool:
+    thread_id = _thread_id_from_headers(headers)
+    if thread_id is None:
+        return False
+    normalized_headers = {key.lower(): value for key, value in headers.items()}
+    client_metadata = (payload.model_extra or {}).get("client_metadata")
+
+    def metadata_value(name: str) -> str | None:
+        # Match upstream projection: explicit body metadata wins, including an
+        # invalid value that must not gain permission through a header fallback.
+        value = (
+            client_metadata[name]
+            if isinstance(client_metadata, dict) and name in client_metadata
+            else normalized_headers.get(name)
+        )
+        return value.strip() if isinstance(value, str) else None
+
+    parent_thread_id = metadata_value("x-codex-parent-thread-id")
+    return (
+        metadata_value("x-openai-subagent") == "collab_spawn"
+        and bool(parent_thread_id)
+        and parent_thread_id != thread_id
+        and _request_is_account_neutral(payload)
+    )
 
 
 def _affinity_with_payload_continuity(
@@ -783,6 +814,11 @@ def _sticky_key_for_responses_request(
         )
     ) is not None:
         policy = thread_affinity
+        if _request_allows_independent_child_placement(payload, headers):
+            # Remove only the process default. The bounded child row and raw
+            # compatibility owner remain authoritative, as do owners resolved
+            # later from files, responses, and live/durable bridge state.
+            policy = replace(policy, seed_selection_key=None, seed_selection_kind=None)
     elif (
         session_affinity := _bare_codex_session_affinity(
             headers,
